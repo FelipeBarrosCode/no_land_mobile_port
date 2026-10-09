@@ -227,7 +227,7 @@ fn update(window: &tauri::Window, text: &str) {
         #[cfg(target_os = "ios")]
         let handle = unsafe { noland_ios_active_stream_surface() };
         #[cfg(not(target_os = "ios"))]
-        let handle = {
+        let handle: *mut std::ffi::c_void = {
             let Ok(surface) = super::stream_window_surface_descriptor(window) else {
                 return;
             };

@@ -122,10 +122,17 @@ pub fn run() {
                 .map_err(|error| format!("Failed to create app data directory: {error}"))?;
 
             let state_path = app_data_dir.join("state.json");
-            let state_store: Arc<dyn StateStore> = Arc::new(JsonStateStore::new(
+            let json_state_store: Arc<dyn StateStore> = Arc::new(JsonStateStore::new(
                 state_path.clone(),
                 config.state_schema_version,
             ));
+            let state_store: Arc<dyn StateStore> = Arc::new(
+                services::state_secrets::KeychainBackedStateStore::new(
+                    json_state_store,
+                    "mobile-port",
+                    true,
+                ),
+            );
 
             let mut moonlight_bootstrap_created = match tauri::async_runtime::block_on(
                 moonlight::composition::bootstrap_default_services(
@@ -155,6 +162,12 @@ pub fn run() {
 
             let mut initial_state = match tauri::async_runtime::block_on(state_store.load_state()) {
                 Ok(state) => state,
+                Err(error @ crate::errors::AppError::SecureStorage(_)) => {
+                    return Err(format!(
+                        "Protected application state could not be unlocked; state.json was left unchanged: {error}"
+                    )
+                    .into());
+                }
                 Err(error) => reset_persisted_state(
                     &state_store,
                     &state_path,
