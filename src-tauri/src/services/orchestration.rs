@@ -31,6 +31,7 @@ use super::{
     moonlight::detect_client_display_for_provisioning,
     network_agent::NetworkAgentProvisioner,
     nvidia_headless::NvidiaHeadlessService,
+    package_manager::wait_for_dpkg_lock,
     post_wireguard_setup::initialize_post_wireguard_flow,
     remote_exec::RemoteExec,
     shared_storage::agent_runtime::ensure_state_agent,
@@ -77,6 +78,17 @@ async fn provision_lifecycle_agent(
         &settings,
     )
     .await
+}
+
+async fn prepare_package_manager_for_agents(remote: &RemoteExec) -> AppResult<()> {
+    if wait_for_dpkg_lock(remote, 180).await? {
+        Ok(())
+    } else {
+        Err(AppError::Provisioning(
+            "The remote package manager remained busy after recovery; retry provisioning once the VM startup updates finish."
+                .to_string(),
+        ))
+    }
 }
 
 async fn persist_direct_network_metadata(
@@ -904,11 +916,21 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         &app,
         &context,
         OrchestrationState::ConnectingSsh,
-        "Installing remote management agents",
+        "Preparing the remote package manager",
         Some(
-            "SSH is connected; uploading and validating the state, lifecycle, and network agents"
+            "SSH is connected; waiting for Ubuntu startup updates and repairing any interrupted package transaction"
                 .to_string(),
         ),
+        false,
+    )
+    .await;
+    prepare_package_manager_for_agents(&remote).await?;
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConnectingSsh,
+        "Installing remote management agents",
+        Some("Uploading and validating the state, lifecycle, and network agents".to_string()),
         false,
     )
     .await;
@@ -1913,11 +1935,21 @@ async fn run_existing_instance_orchestration(
         &app,
         &context,
         OrchestrationState::ConnectingSsh,
-        "Installing remote management agents",
+        "Preparing the remote package manager",
         Some(
-            "SSH is connected; uploading and validating the state, lifecycle, and network agents"
+            "SSH is connected; waiting for Ubuntu startup updates and repairing any interrupted package transaction"
                 .to_string(),
         ),
+        false,
+    )
+    .await;
+    prepare_package_manager_for_agents(&remote).await?;
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConnectingSsh,
+        "Installing remote management agents",
+        Some("Uploading and validating the state, lifecycle, and network agents".to_string()),
         false,
     )
     .await;
