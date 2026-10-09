@@ -78,6 +78,8 @@ targets:
     entitlements:
       path: noland-connect_iOS/noland-connect_iOS.entitlements
       properties:
+        com.apple.developer.networking.networkextension:
+          - packet-tunnel-provider
         com.apple.security.application-groups:
           - group.com.noland.connect.mobile.shared
         keychain-access-groups:
