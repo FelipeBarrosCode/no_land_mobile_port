@@ -94,7 +94,11 @@ pub fn build_launch_parameters(
         ri_key_id: crypto.iv_decimal(),
         audio_configuration: preferences.audio.configuration,
         play_audio_on_host: preferences.audio.play_on_host,
-        active_gamepad_mask: 0,
+        // Moonlight iOS always advertises player 1 when on-screen controls are
+        // available. Several hosts/games don't create a controller correctly
+        // when the first gamepad arrives after launch, which breaks both OSC-only
+        // play and a physical controller connected later.
+        active_gamepad_mask: if cfg!(target_os = "ios") { 1 } else { 0 },
         persist_gamepads_after_disconnect: preferences.input.persist_controllers_on_disconnect,
         hdr: preferences.video.hdr,
     }

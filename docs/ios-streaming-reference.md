@@ -37,6 +37,11 @@ scrim/Resume action. It scrolls within safe areas on smaller displays.
   controller arrival/state API as physical controllers and allocates a free
   controller slot. Visible controls take touch priority; finger-to-cursor input
   is suppressed while the controller overlay is enabled, including empty regions.
+  Like Moonlight iOS, on-screen controls and the first physical controller merge
+  into player 1 rather than competing for separate slots. iOS advertises player
+  1 in the launch request so OSC-only play and controllers connected after launch
+  work with games that do not handle late controller creation. Stream teardown
+  restores GameController system-gesture ownership for use outside the stream.
 - **Keyboard / Return to Noland:** available within the drawer. The keyboard has
   a Done toolbar and hides the overlay while visible. ASCII characters use
   virtual key pairs; non-ASCII text uses UTF-8. Hardware keys handled by Moonlight

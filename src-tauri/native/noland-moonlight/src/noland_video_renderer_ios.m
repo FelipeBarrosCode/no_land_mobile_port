@@ -96,6 +96,8 @@ extern void noland_ios_stream_dismiss(void);
 @property (atomic, assign) BOOL inputSuspended;
 @property (nonatomic, assign) NSUInteger virtualNumber;
 @property (nonatomic, assign) BOOL virtualAnnounced;
+@property (nonatomic, assign) BOOL virtualEnabled;
+@property (nonatomic, assign) NolandVirtualGamepadState virtualState;
 - (void)start;
 - (void)stop;
 - (void)announceControllers;
@@ -665,7 +667,8 @@ static int16_t nl_ios_axis(float value) {
 @implementation NolandControllerInput
 - (NSUInteger)nextControllerNumber {
   bool occupied[16] = { false };
-  if (self.virtualNumber < 16) occupied[self.virtualNumber] = true;
+  // Match Moonlight iOS: the OSC and the first physical controller share player
+  // 1. Treating OSC as a separate controller makes many games ignore it.
   for (NSNumber* value in self.controllerNumbers.objectEnumerator) {
     if (value.unsignedIntegerValue < 16) occupied[value.unsignedIntegerValue] = true;
   }
@@ -673,7 +676,7 @@ static int16_t nl_ios_axis(float value) {
   return NSNotFound;
 }
 - (uint16_t)activeMask {
-  uint16_t mask = self.virtualNumber < 16 ? (uint16_t)(1u << self.virtualNumber) : 0;
+  uint16_t mask = self.virtualEnabled ? 1 : 0;
   for (NSNumber* value in self.controllerNumbers.objectEnumerator) {
     NSUInteger number = value.unsignedIntegerValue;
     if (number < 16) mask |= (uint16_t)(1u << number);
@@ -688,6 +691,11 @@ static int16_t nl_ios_axis(float value) {
   if (number == NSNotFound) return;
   [self.controllerNumbers setObject:@(number) forKey:controller];
   if (@available(iOS 14.0, *)) {
+    // Moonlight disables controller system gestures only for the active stream,
+    // then restores them during teardown so the external controller works in
+    // iOS and subsequent sessions.
+    for (GCControllerElement* element in controller.physicalInputProfile.allElements)
+      element.preferredSystemGestureState = GCSystemGestureStateDisabled;
     NSArray* motors = @[
       [[NolandHapticMotor alloc] initWithController:controller locality:GCHapticsLocalityLeftHandle] ?: NSNull.null,
       [[NolandHapticMotor alloc] initWithController:controller locality:GCHapticsLocalityRightHandle] ?: NSNull.null,
@@ -721,6 +729,24 @@ static int16_t nl_ios_axis(float value) {
     NSNumber* assigned = [strongSelf.controllerNumbers objectForKey:controller];
     if (assigned == nil) return;
     NSUInteger currentNumber = assigned.unsignedIntegerValue;
+    uint8_t leftTrigger = (uint8_t)lrintf(gamepad.leftTrigger.value * 255.0f);
+    uint8_t rightTrigger = (uint8_t)lrintf(gamepad.rightTrigger.value * 255.0f);
+    int16_t leftX = nl_ios_axis(gamepad.leftThumbstick.xAxis.value);
+    int16_t leftY = nl_ios_axis(gamepad.leftThumbstick.yAxis.value);
+    int16_t rightX = nl_ios_axis(gamepad.rightThumbstick.xAxis.value);
+    int16_t rightY = nl_ios_axis(gamepad.rightThumbstick.yAxis.value);
+    if (currentNumber == 0 && strongSelf.virtualEnabled) {
+      NolandVirtualGamepadState virtualState = strongSelf.virtualState;
+      buttons |= virtualState.buttons;
+      leftTrigger = MAX(leftTrigger, virtualState.leftTrigger);
+      rightTrigger = MAX(rightTrigger, virtualState.rightTrigger);
+#define STRONGER_AXIS(physical, virtualAxis) (abs(virtualAxis) > abs(physical) ? (virtualAxis) : (physical))
+      leftX = STRONGER_AXIS(leftX, virtualState.leftX);
+      leftY = STRONGER_AXIS(leftY, virtualState.leftY);
+      rightX = STRONGER_AXIS(rightX, virtualState.rightX);
+      rightY = STRONGER_AXIS(rightY, virtualState.rightY);
+#undef STRONGER_AXIS
+    }
     uint16_t mask = [strongSelf activeMask];
     if (![strongSelf.announcedControllers containsObject:assigned]) {
       uint32_t supported = A_FLAG | B_FLAG | X_FLAG | Y_FLAG | UP_FLAG | DOWN_FLAG |
@@ -758,12 +784,7 @@ static int16_t nl_ios_axis(float value) {
       }
     }
     nl_send_controller(runtime, (uint16_t)currentNumber, mask, buttons,
-      (uint8_t)lrintf(gamepad.leftTrigger.value * 255.0f),
-      (uint8_t)lrintf(gamepad.rightTrigger.value * 255.0f),
-      nl_ios_axis(gamepad.leftThumbstick.xAxis.value),
-      nl_ios_axis(gamepad.leftThumbstick.yAxis.value),
-      nl_ios_axis(gamepad.rightThumbstick.xAxis.value),
-      nl_ios_axis(gamepad.rightThumbstick.yAxis.value));
+      leftTrigger, rightTrigger, leftX, leftY, rightX, rightY);
   };
 }
 - (void)bindMouse:(GCMouse*)mouse API_AVAILABLE(ios(14.0)) {
@@ -822,6 +843,7 @@ static int16_t nl_ios_axis(float value) {
     if (assigned == nil) return;
     [strongSelf.controllerNumbers removeObjectForKey:controller];
     [strongSelf.announcedControllers removeObject:assigned];
+    if (assigned.unsignedIntegerValue == 0) strongSelf.virtualAnnounced = NO;
     for (id motor in strongSelf.hapticMotors[assigned])
       if ([motor isKindOfClass:[NolandHapticMotor class]]) [motor stop];
     [strongSelf.hapticMotors removeObjectForKey:assigned];
@@ -833,9 +855,9 @@ static int16_t nl_ios_axis(float value) {
       }
     }
     nl_runtime_t* runtime = nl_ios_runtime(strongSelf.renderer);
-    if (runtime != NULL) {
+    if (strongSelf.virtualEnabled) [strongSelf sendVirtualGamepad:strongSelf.virtualState enabled:YES];
+    else if (runtime != NULL)
       nl_send_controller(runtime, assigned.unsignedShortValue, [strongSelf activeMask], 0, 0, 0, 0, 0, 0, 0);
-    }
   }];
   [self.observers addObject:disconnected];
   if (@available(iOS 14.0, *)) {
@@ -858,12 +880,27 @@ static int16_t nl_ios_axis(float value) {
   if (!runtime) return;
   if (!enabled) {
     NSUInteger number = self.virtualNumber;
+    self.virtualEnabled = NO; self.virtualState = (NolandVirtualGamepadState){0};
     self.virtualNumber = NSNotFound; self.virtualAnnounced = NO;
+    for (GCController* controller in self.controllerNumbers.keyEnumerator) {
+      NSNumber* assigned = [self.controllerNumbers objectForKey:controller];
+      if (assigned.unsignedIntegerValue == 0 && controller.extendedGamepad.valueChangedHandler) {
+        controller.extendedGamepad.valueChangedHandler(controller.extendedGamepad, controller.extendedGamepad.buttonA);
+        return;
+      }
+    }
     if (number < 16) nl_send_controller(runtime, (uint16_t)number, [self activeMask], 0, 0, 0, 0, 0, 0, 0);
     return;
   }
-  if (self.virtualNumber == NSNotFound) self.virtualNumber = [self nextControllerNumber];
-  if (self.virtualNumber == NSNotFound) return;
+  self.virtualEnabled = YES; self.virtualState = state; self.virtualNumber = 0;
+  for (GCController* controller in self.controllerNumbers.keyEnumerator) {
+    NSNumber* assigned = [self.controllerNumbers objectForKey:controller];
+    if (assigned.unsignedIntegerValue == 0 && controller.extendedGamepad.valueChangedHandler) {
+      controller.extendedGamepad.valueChangedHandler(controller.extendedGamepad, controller.extendedGamepad.buttonA);
+      self.virtualAnnounced = [self.announcedControllers containsObject:assigned];
+      return;
+    }
+  }
   uint16_t mask = [self activeMask];
   if (!self.virtualAnnounced) {
     uint32_t buttons = A_FLAG | B_FLAG | X_FLAG | Y_FLAG | UP_FLAG | DOWN_FLAG | LEFT_FLAG | RIGHT_FLAG |
@@ -875,9 +912,16 @@ static int16_t nl_ios_axis(float value) {
       state.leftTrigger, state.rightTrigger, state.leftX, state.leftY, state.rightX, state.rightY);
 }
 - (void)stop {
+  self.inputSuspended = YES;
   [self sendVirtualGamepad:(NolandVirtualGamepadState){0} enabled:NO];
   for (id observer in self.observers) [NSNotificationCenter.defaultCenter removeObserver:observer];
-  for (GCController* controller in GCController.controllers) controller.extendedGamepad.valueChangedHandler = nil;
+  for (GCController* controller in GCController.controllers) {
+    controller.extendedGamepad.valueChangedHandler = nil;
+    if (@available(iOS 14.0, *)) {
+      for (GCControllerElement* element in controller.physicalInputProfile.allElements)
+        element.preferredSystemGestureState = GCSystemGestureStateEnabled;
+    }
+  }
   if (@available(iOS 14.0, *)) {
     for (GCMouse* mouse in GCMouse.mice) {
       mouse.mouseInput.mouseMovedHandler = nil;

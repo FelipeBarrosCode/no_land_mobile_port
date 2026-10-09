@@ -141,7 +141,9 @@ static bool nl_microphone_configure_audio_session(void) {
   NSError* error = nil;
   AVAudioSessionCategoryOptions options =
       AVAudioSessionCategoryOptionDefaultToSpeaker |
-      AVAudioSessionCategoryOptionAllowBluetoothHFP;
+      // AllowBluetoothHFP is the iOS 26 spelling of the long-standing HFP bit.
+      // Use the compatible SDK spelling so CI and deployment SDKs both compile.
+      (AVAudioSessionCategoryOptions)(1UL << 2);
   if (![session setCategory:AVAudioSessionCategoryPlayAndRecord
                          mode:AVAudioSessionModeVoiceChat
                       options:options
