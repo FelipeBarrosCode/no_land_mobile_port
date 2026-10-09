@@ -48,3 +48,5 @@ jobs:
           npm run check:ios:streaming
       - name: Compile packet tunnel for Simulator
         run: npm run check:ios:vpn
+      - name: Verify UIKit controller routing and reconnect lifecycle
+        run: npm run check:ios:controls

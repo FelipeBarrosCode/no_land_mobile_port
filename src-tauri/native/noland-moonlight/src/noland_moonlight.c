@@ -1301,13 +1301,21 @@ nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {
         }
         for (key = 0; key < 16; key++) {
           if ((runtime->active_gamepad_mask & (1U << key)) != 0U) {
+#ifdef NOLAND_IOS_RENDERER
+            // Menu/focus changes release buttons, not devices. A zero mask is a
+            // host-side disconnect and invalidates controller arrival state.
+            (void)LiSendMultiControllerEvent((short)key, (short)runtime->active_gamepad_mask, 0, 0, 0, 0, 0, 0, 0);
+#else
             (void)LiSendMultiControllerEvent((short)key, 0, 0, 0, 0, 0, 0, 0, 0);
+#endif
           }
         }
         (void)LiSendTouchEvent(LI_TOUCH_EVENT_CANCEL_ALL, 0, 0, 0, 0, 0, 0, LI_ROT_UNKNOWN);
       }
       memset(runtime->pressed_mouse_buttons, 0, sizeof(runtime->pressed_mouse_buttons));
       memset(runtime->pressed_keys, 0, sizeof(runtime->pressed_keys));
+#ifndef NOLAND_IOS_RENDERER
       runtime->active_gamepad_mask = 0;
+#endif
       return NL_RESULT_OK;
     }

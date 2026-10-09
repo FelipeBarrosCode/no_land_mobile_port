@@ -29,6 +29,7 @@ extern bool nl_ios_input_capture_active(void);
 extern void noland_ios_stream_dismiss(void);
 
 @class NolandKeyboardResponder;
+@class NolandControllerInput;
 
 @interface NolandStreamView : UIView {
   CGPoint _touchLocation;
@@ -50,6 +51,7 @@ extern void noland_ios_stream_dismiss(void);
 @property (nonatomic, strong) NolandStreamControls* controls;
 @property (nonatomic, strong) NSMutableArray<id>* inputObservers;
 @property (nonatomic, strong) NolandKeyboardResponder* keyboardResponder;
+@property (nonatomic, weak) NolandControllerInput* controllerInput;
 - (void)prepareForRemoval;
 - (void)cancelPointerInput;
 - (void)insertText:(NSString*)text;
@@ -98,9 +100,12 @@ extern void noland_ios_stream_dismiss(void);
 @property (nonatomic, assign) BOOL virtualAnnounced;
 @property (nonatomic, assign) BOOL virtualEnabled;
 @property (nonatomic, assign) NolandVirtualGamepadState virtualState;
+@property (nonatomic, strong) NSTimer* arrivalRetryTimer;
 - (void)start;
 - (void)stop;
 - (void)announceControllers;
+- (void)beginStream;
+- (void)sendPhysicalController:(GCController*)controller;
 - (void)sendVirtualGamepad:(NolandVirtualGamepadState)state enabled:(BOOL)enabled;
 @end
 
@@ -303,13 +308,16 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
       NolandStreamView* view = weakSelf;
       if (!view) return;
       [view cancelPointerInput];
-      g_controller_input.inputSuspended = visible;
+      view.controllerInput.inputSuspended = visible;
       if (visible) {
         [view hideKeyboard];
         nl_runtime_t* runtime = nl_ios_runtime(view.renderer);
         if (runtime) nl_release_all_input(runtime);
         [view->_hardwareKeys removeAllObjects];
-      } else [view.controls refreshGamepad];
+      } else {
+        [view.controllerInput announceControllers];
+        [view.controls refreshGamepad];
+      }
     };
     self.controls.modeChanged = ^{ [weakSelf cancelPointerInput]; };
     self.controls.keyboardRequested = ^{ [weakSelf showKeyboard]; };
@@ -321,7 +329,7 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
       if (!view) return;
       if (enabled && !view->_gamepadOwnsTouches) [view cancelPointerInput];
       view->_gamepadOwnsTouches = enabled;
-      [g_controller_input sendVirtualGamepad:state enabled:enabled];
+      [view.controllerInput sendVirtualGamepad:state enabled:enabled];
     };
     id show = [NSNotificationCenter.defaultCenter addObserverForName:UIKeyboardWillShowNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
       NolandStreamView* view = weakSelf;
@@ -346,11 +354,12 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
       nl_runtime_t* runtime = nl_ios_runtime(view.renderer);
       if (runtime) nl_release_all_input(runtime);
       [view->_hardwareKeys removeAllObjects];
-      g_controller_input.inputSuspended = YES;
+      view.controllerInput.inputSuspended = YES;
     }];
     id active = [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
       NolandStreamView* view = weakSelf;
-      g_controller_input.inputSuspended = view.controls.menuVisible || !view.window;
+      view.controllerInput.inputSuspended = view.controls.menuVisible || !view.window;
+      [view.controllerInput announceControllers];
       [view.controls refreshGamepad];
     }];
     [self.inputObservers addObjectsFromArray:@[show, hide, inactive, active]];
@@ -388,7 +397,7 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
   [self.controls releaseControls];
   [self hideKeyboard];
   [self resignFirstResponder];
-  g_controller_input.inputSuspended = YES;
+  self.controllerInput.inputSuspended = YES;
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   if (runtime != NULL) nl_release_all_input(runtime);
   noland_ios_stream_dismiss();
@@ -644,6 +653,7 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   if (runtime != NULL) nl_release_all_input(runtime);
   self.renderer = NULL;
+  self.controllerInput = nil;
 }
 - (void)didMoveToWindow {
   [super didMoveToWindow];
@@ -652,8 +662,12 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
     [self cancelPointerInput]; [self.controls releaseControls];
     [_hardwareKeys removeAllObjects];
   }
-  g_controller_input.inputSuspended = !self.window || self.controls.menuVisible;
-  if (self.window) { [self becomeFirstResponder]; [self.controls refreshGamepad]; }
+  self.controllerInput.inputSuspended = !self.window || self.controls.menuVisible;
+  if (self.window) {
+    [self becomeFirstResponder];
+    [self.controllerInput announceControllers];
+    [self.controls refreshGamepad];
+  }
 }
 - (void)dealloc {
   [_dragTimer invalidate]; [_clickTimer invalidate];
@@ -691,6 +705,8 @@ static int16_t nl_ios_axis(float value) {
   NSUInteger number = existing != nil ? existing.unsignedIntegerValue : [self nextControllerNumber];
   if (number == NSNotFound) return;
   [self.controllerNumbers setObject:@(number) forKey:controller];
+  controller.handlerQueue = dispatch_get_main_queue();
+  controller.playerIndex = (GCControllerPlayerIndex)number;
   if (@available(iOS 14.0, *)) {
     // Moonlight disables controller system gestures only for the active stream,
     // then restores them during teardown so the external controller works in
@@ -706,9 +722,16 @@ static int16_t nl_ios_axis(float value) {
     self.hapticMotors[@(number)] = motors;
   }
   __weak NolandControllerInput* weakSelf = self;
+  __weak GCController* weakController = controller;
   pad.valueChangedHandler = ^(GCExtendedGamepad* gamepad, GCControllerElement* element) {
     (void)element;
-    NolandControllerInput* strongSelf = weakSelf;
+    [weakSelf sendPhysicalController:weakController];
+  };
+}
+- (void)sendPhysicalController:(GCController*)controller {
+    if (!controller) return;
+    GCExtendedGamepad* gamepad = controller.extendedGamepad;
+    NolandControllerInput* strongSelf = self;
     nl_runtime_t* runtime = nl_ios_runtime(strongSelf.renderer);
     if (runtime == NULL || strongSelf.inputSuspended) return;
     uint32_t buttons = 0;
@@ -782,11 +805,10 @@ static int16_t nl_ios_axis(float value) {
           LiSendControllerBatteryEvent((uint8_t)currentNumber, state,
               (uint8_t)lrintf(fminf(1.0f, fmaxf(0.0f, controller.battery.batteryLevel)) * 100.0f));
         }
-      }
+      } else return; // Retry arrival later; don't send state before it succeeds.
     }
     nl_send_controller(runtime, (uint16_t)currentNumber, mask, buttons,
       leftTrigger, rightTrigger, leftX, leftY, rightX, rightY);
-  };
 }
 - (void)bindMouse:(GCMouse*)mouse API_AVAILABLE(ios(14.0)) {
   __weak NolandControllerInput* weakSelf = self;
@@ -822,6 +844,8 @@ static int16_t nl_ios_axis(float value) {
 }
 - (void)start {
   self.virtualNumber = NSNotFound;
+  self.virtualEnabled = NO;
+  self.virtualAnnounced = NO;
   self.observers = [NSMutableArray array];
   self.controllerNumbers = [NSMapTable weakToStrongObjectsMapTable];
   self.announcedControllers = [NSMutableSet set];
@@ -835,6 +859,7 @@ static int16_t nl_ios_axis(float value) {
   id connected = [NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidConnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
     GCController* controller = note.object;
     [weakSelf bindController:controller];
+    [weakSelf sendPhysicalController:controller];
   }];
   [self.observers addObject:connected];
   id disconnected = [NSNotificationCenter.defaultCenter addObserverForName:GCControllerDidDisconnectNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
@@ -842,6 +867,9 @@ static int16_t nl_ios_axis(float value) {
     GCController* controller = note.object;
     NSNumber* assigned = [strongSelf.controllerNumbers objectForKey:controller];
     if (assigned == nil) return;
+    controller.extendedGamepad.valueChangedHandler = nil;
+    for (GCControllerElement* element in controller.physicalInputProfile.allElements)
+      element.preferredSystemGestureState = GCSystemGestureStateEnabled;
     [strongSelf.controllerNumbers removeObjectForKey:controller];
     [strongSelf.announcedControllers removeObject:assigned];
     if (assigned.unsignedIntegerValue == 0) strongSelf.virtualAnnounced = NO;
@@ -856,7 +884,8 @@ static int16_t nl_ios_axis(float value) {
       }
     }
     nl_runtime_t* runtime = nl_ios_runtime(strongSelf.renderer);
-    if (strongSelf.virtualEnabled) [strongSelf sendVirtualGamepad:strongSelf.virtualState enabled:YES];
+    if (assigned.unsignedIntegerValue == 0 && strongSelf.virtualEnabled)
+      [strongSelf sendVirtualGamepad:strongSelf.virtualState enabled:YES];
     else if (runtime != NULL)
       nl_send_controller(runtime, assigned.unsignedShortValue, [strongSelf activeMask], 0, 0, 0, 0, 0, 0, 0);
   }];
@@ -871,10 +900,28 @@ static int16_t nl_ios_axis(float value) {
 }
 - (void)announceControllers {
   for (GCController* controller in self.controllerNumbers.keyEnumerator) {
-    GCExtendedGamepad* gamepad = controller.extendedGamepad;
-    if (gamepad != nil && gamepad.valueChangedHandler != nil)
-      gamepad.valueChangedHandler(gamepad, gamepad.buttonA);
+    [self sendPhysicalController:controller];
   }
+}
+- (void)beginStream {
+  [self.announcedControllers removeAllObjects];
+  self.virtualAnnounced = NO;
+  [self.arrivalRetryTimer invalidate];
+  // Video start precedes connectionStarted. Initial arrival can fail, even with
+  // a controller already attached. Retry without requiring a button press.
+  __weak NolandControllerInput* weakSelf = self;
+  self.arrivalRetryTimer = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer* timer) {
+    NolandControllerInput* input = weakSelf;
+    if (!input) { [timer invalidate]; return; }
+    for (GCController* controller in input.controllerNumbers.keyEnumerator) {
+      if (![input.announcedControllers containsObject:[input.controllerNumbers objectForKey:controller]])
+        [input sendPhysicalController:controller];
+    }
+    if (input.virtualEnabled && !input.virtualAnnounced)
+      [input sendVirtualGamepad:input.virtualState enabled:YES];
+  }];
+  [NSRunLoop.mainRunLoop addTimer:self.arrivalRetryTimer forMode:NSRunLoopCommonModes];
+  [self announceControllers];
 }
 - (void)sendVirtualGamepad:(NolandVirtualGamepadState)state enabled:(BOOL)enabled {
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
@@ -885,8 +932,8 @@ static int16_t nl_ios_axis(float value) {
     self.virtualNumber = NSNotFound; self.virtualAnnounced = NO;
     for (GCController* controller in self.controllerNumbers.keyEnumerator) {
       NSNumber* assigned = [self.controllerNumbers objectForKey:controller];
-      if (assigned.unsignedIntegerValue == 0 && controller.extendedGamepad.valueChangedHandler) {
-        controller.extendedGamepad.valueChangedHandler(controller.extendedGamepad, controller.extendedGamepad.buttonA);
+      if (assigned.unsignedIntegerValue == 0) {
+        [self sendPhysicalController:controller];
         return;
       }
     }
@@ -896,8 +943,8 @@ static int16_t nl_ios_axis(float value) {
   self.virtualEnabled = YES; self.virtualState = state; self.virtualNumber = 0;
   for (GCController* controller in self.controllerNumbers.keyEnumerator) {
     NSNumber* assigned = [self.controllerNumbers objectForKey:controller];
-    if (assigned.unsignedIntegerValue == 0 && controller.extendedGamepad.valueChangedHandler) {
-      controller.extendedGamepad.valueChangedHandler(controller.extendedGamepad, controller.extendedGamepad.buttonA);
+    if (assigned.unsignedIntegerValue == 0) {
+      [self sendPhysicalController:controller];
       self.virtualAnnounced = [self.announcedControllers containsObject:assigned];
       return;
     }
@@ -907,16 +954,18 @@ static int16_t nl_ios_axis(float value) {
     uint32_t buttons = A_FLAG | B_FLAG | X_FLAG | Y_FLAG | UP_FLAG | DOWN_FLAG | LEFT_FLAG | RIGHT_FLAG |
         LB_FLAG | RB_FLAG | PLAY_FLAG | BACK_FLAG | LS_CLK_FLAG | RS_CLK_FLAG;
     self.virtualAnnounced = nl_send_controller_arrival(runtime, (uint8_t)self.virtualNumber, mask, LI_CTYPE_XBOX, buttons, 0) == NL_RESULT_OK;
+    if (!self.virtualAnnounced) return;
   }
   if (self.inputSuspended) state = (NolandVirtualGamepadState){0};
   nl_send_controller(runtime, (uint16_t)self.virtualNumber, mask, state.buttons,
       state.leftTrigger, state.rightTrigger, state.leftX, state.leftY, state.rightX, state.rightY);
 }
 - (void)stop {
+  [self.arrivalRetryTimer invalidate]; self.arrivalRetryTimer = nil;
   self.inputSuspended = YES;
   [self sendVirtualGamepad:(NolandVirtualGamepadState){0} enabled:NO];
   for (id observer in self.observers) [NSNotificationCenter.defaultCenter removeObserver:observer];
-  for (GCController* controller in GCController.controllers) {
+  for (GCController* controller in self.controllerNumbers.keyEnumerator) {
     controller.extendedGamepad.valueChangedHandler = nil;
     if (@available(iOS 14.0, *)) {
       for (GCControllerElement* element in controller.physicalInputProfile.allElements)
@@ -1559,6 +1608,11 @@ void nl_video_renderer_platform_attach_surface(nl_video_renderer_t* renderer, co
       ctx->controller_input.renderer = renderer;
       [ctx->controller_input start];
     }
+    if ([view isKindOfClass:NolandStreamView.class]) {
+      NolandStreamView* streamView = (NolandStreamView*)view;
+      streamView.controllerInput = ctx->controller_input;
+      ctx->controller_input.inputSuspended = streamView.controls.menuVisible || !view.window;
+    }
     if ([view isKindOfClass:NolandStreamView.class]) [((NolandStreamView*)view).controls refreshGamepad];
     nl_ios_start_lifecycle_observers(renderer, ctx);
 
@@ -1623,6 +1677,11 @@ void nl_video_renderer_platform_start(nl_video_renderer_t* renderer) {
   if (ctx == NULL) return;
 
   nl_ios_run_on_main_sync(^{
+    // Cleanup preserves renderer->surface but destroys its native context and
+    // input manager. Reattach that exact surface on every new connection rather
+    // than creating an unbound fallback view with no input callbacks.
+    if (renderer->surface_attached)
+      nl_video_renderer_platform_attach_surface(renderer, &renderer->surface);
     UIView* view = nl_ios_resolve_render_view(ctx);
     if (view == nil) return;
 
@@ -1638,7 +1697,7 @@ void nl_video_renderer_platform_start(nl_video_renderer_t* renderer) {
     }
 
     if (ctx->layer != nil) [ctx->layer flushAndRemoveImage];
-    [ctx->controller_input announceControllers];
+    [ctx->controller_input beginStream];
     if ([view isKindOfClass:NolandStreamView.class]) [((NolandStreamView*)view).controls refreshGamepad];
 
     if (ctx->display_link != nil) {

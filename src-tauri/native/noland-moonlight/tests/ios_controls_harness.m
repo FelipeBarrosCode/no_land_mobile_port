@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 #import "noland_stream_controls_ios.h"
 #include "Limelight.h"
+#import "ios_controller_checks.m"
 
 @interface NolandStreamControls (Harness)
 - (void)requestKeyboard;
@@ -84,6 +85,7 @@ static UIView* findLabel(UIView* root, NSString* label) {
   [controls detach];
   NSCAssert(self.view.gestureRecognizers.count == 0, @"Detach removes stream gestures");
   NSLog(@"NOLAND_UI_ROUTING_PASS");
+  runControllerChecks(self.view.window);
   exit(0);
 }
 @end

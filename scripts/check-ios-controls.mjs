@@ -5,8 +5,8 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const device = process.argv[2];
-if (!device || process.platform !== 'darwin') throw new Error('Pass an available iOS simulator UDID on macOS.');
+let device = process.argv[2];
+if (process.platform !== 'darwin') throw new Error('iOS controller checks require macOS.');
 function run(cmd, args, timeout = 120000) {
   const result = spawnSync(cmd, args, { encoding: 'utf8', timeout });
   if (result.status !== 0) throw new Error(`${cmd} failed: ${result.error ?? ''}\n${result.stdout}\n${result.stderr}`);
@@ -16,13 +16,20 @@ const root = mkdtempSync(join(tmpdir(), 'noland-controls-test-'));
 const bundle = 'dev.noland.inputchecks';
 let bootedHere = false;
 try {
+  const devices = JSON.parse(run('xcrun', ['simctl', 'list', 'devices', 'available', '--json']));
+  if (!device) device = Object.entries(devices.devices)
+    .filter(([runtime]) => runtime.includes('iOS'))
+    .flatMap(([, entries]) => entries).find(d => d.name.startsWith('iPhone'))?.udid;
+  const selected = Object.values(devices.devices).flat().find(d => d.udid === device);
+  if (!selected) throw new Error('No available iOS Simulator; install a runtime or pass its UDID.');
   const app = join(root, 'NolandControlsTest.app');
   mkdirSync(app);
   const sdk = run('xcrun', ['--sdk', 'iphonesimulator', '--show-sdk-path']).trim();
   const source = resolve('src-tauri/native/noland-moonlight');
-  run('xcrun', ['clang', '-target', 'arm64-apple-ios15.0-simulator', '-isysroot', sdk,
+  run('xcrun', ['clang', '-target', `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-ios15.0-simulator`, '-isysroot', sdk,
     '-fobjc-arc', '-framework', 'UIKit', '-framework', 'Foundation', '-framework', 'QuartzCore', '-framework', 'CoreGraphics',
-    '-I', join(source, 'src'), '-I', resolve('src-tauri/native/moonlight-common-c/src'),
+    '-framework', 'AVFoundation', '-framework', 'CoreMedia', '-framework', 'CoreVideo', '-framework', 'GameController', '-framework', 'CoreHaptics',
+    '-I', join(source, 'src'), '-I', join(source, 'include'), '-I', resolve('src-tauri/native/moonlight-common-c/src'),
     join(source, 'tests/ios_controls_harness.m'), join(source, 'src/noland_stream_controls_ios.m'),
     '-o', join(app, 'NolandControlsTest')]);
   writeFileSync(join(app, 'Info.plist'), `<?xml version="1.0" encoding="UTF-8"?>
@@ -36,17 +43,15 @@ try {
 <key>UILaunchScreen</key><dict/>
 </dict></plist>`);
   run('codesign', ['--force', '--sign', '-', app]);
-  const devices = JSON.parse(run('xcrun', ['simctl', 'list', 'devices', 'available', '--json']));
-  const selected = Object.values(devices.devices).flat().find(d => d.udid === device);
-  if (!selected) throw new Error('Simulator not found');
   if (selected.state !== 'Booted') { run('xcrun', ['simctl', 'boot', device]); bootedHere = true; }
   run('xcrun', ['simctl', 'bootstatus', device, '-b'], 300000);
   run('xcrun', ['simctl', 'install', device, app]);
   const output = run('xcrun', ['simctl', 'launch', '--console', '--terminate-running-process', device, bundle]);
   if (!output.includes('NOLAND_UI_ROUTING_PASS')) throw new Error(`UIKit checks did not complete:\n${output}`);
-  console.log('UIKit routing passed: hidden/visible gamepad hit targets, multi-button state, gesture exclusion, no keyboard requests, menu capture and cleanup.');
+  if (!output.includes('NOLAND_CONTROLLER_LIFECYCLE_PASS')) throw new Error(`Controller checks did not complete:\n${output}`);
+  console.log('UIKit routing and controller transport checks passed: OSC-only, physical-only, simultaneous input, toggle, menu, hot unplug/reconnect, arrival retry and stream restart.');
 } finally {
-  spawnSync('xcrun', ['simctl', 'uninstall', device, bundle]);
+  if (device) spawnSync('xcrun', ['simctl', 'uninstall', device, bundle]);
   if (bootedHere) spawnSync('xcrun', ['simctl', 'shutdown', device]);
   rmSync(root, { recursive: true, force: true });
 }

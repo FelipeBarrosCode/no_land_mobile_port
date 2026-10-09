@@ -34,8 +34,8 @@ scrim/Resume action. It scrolls within safe areas on smaller displays.
   respect the rendered video's aspect ratio and letterboxing.
 - **On-screen controller:** two analog sticks, D-pad (including diagonals),
   ABXY, shoulders, digital LT/RT, L3/R3, Select/Start. Uses the same Moonlight
-  controller arrival/state API as physical controllers and allocates a free
-  controller slot. Visible controls take touch priority; finger-to-cursor input
+  controller arrival/state API as physical controllers. Visible controls take
+  touch priority; finger-to-cursor input
   is suppressed while the controller overlay is enabled, including empty regions.
   Like Moonlight iOS, on-screen controls and the first physical controller merge
   into player 1 rather than competing for separate slots. iOS advertises player
@@ -72,3 +72,24 @@ gamepad exclusion from menu gestures, no keyboard requests from button actions,
 menu interception, and cleanup. This harness uses the real overlay with synthetic
 touch targets/control actions; physical gestures, host-side gamepad response and
 keyboard results still need live stream testing on the installed device build.
+
+### Controller lifecycle regression coverage
+
+The controller harness now compiles the production renderer/manager and uses
+real `GCController` snapshot profiles with a recording transport boundary. It
+checks OSC-only input, physical-only input, merged held buttons/sticks/triggers,
+overlay toggling without losing physical input, menu resume, hot unplug/reconnect,
+failed-arrival retry, and cleanup/setup/start with the same surface descriptor.
+This is distinct from testing Bluetooth transport or a remote game.
+
+The corrected lifecycle retains the host gamepad mask when releasing held input
+for menu/focus changes; only device removal removes a slot. Each stream view
+addresses its own manager, so stale view notifications cannot suspend another
+session's controller. Every renderer start reattaches the preserved surface,
+recreates missing controller bindings, resets arrival state and retries arrivals
+after the input transport becomes ready. Physical events use a dedicated send
+method, independent of overlay visibility or another source's callback.
+
+Reference: Moonlight iOS `ControllerSupport.m` — `updateFinished:`,
+`reportControllerArrival:`, `registerControllerCallbacks:`, and controller
+connect/disconnect observers at the pinned revision above.
