@@ -1,0 +1,958 @@
+import { translate, translateSource, useLocalization } from "../lib/i18n";
+import { useEffect, useRef, useState } from "react";
+
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { exit as exitApp } from "@tauri-apps/plugin-process";
+import { BlockingLoaderOverlay } from "../components/ui/BlockingLoaderOverlay";
+import { HashRouter, Navigate, Route, Routes } from "react-router-dom";
+import { Button } from "../components/ui/Button";
+import { Card } from "../components/ui/Card";
+import { ModalBody, ModalFrame } from "../components/ui/ModalFrame";
+import { SocialLinks } from "../components/ui/SocialLinks";
+import { DashboardScreen } from "../features/dashboard/DashboardScreen";
+import { OnboardingScreen } from "../features/onboarding/OnboardingScreen";
+import { ProvisioningScreen } from "../features/provisioning/ProvisioningScreen";
+import { SettingsScreen } from "../features/settings/SettingsScreen";
+import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
+import { useAppStore } from "../store/appStore";
+import appLogo from "../public/noland.png";
+import { moonlightGetSessionState, refreshStateAgentIndex } from "../lib/backend";
+import { buildDiagnosticIssueUrl } from "../lib/githubIssue";
+import { isRunningInTauri } from "../lib/tauri";
+import { notifyInstancesNeedAttention } from "../lib/instanceNotifications";
+
+import {
+  checkForAppUpdate,
+  installPendingAppUpdate,
+  type AppUpdateInfo,
+  type AppUpdateProgress,
+} from "../lib/updateChecker";
+
+function RootRoute() {
+  const appState = useAppStore((state) => state.appState);
+  const busy = useAppStore((state) => state.busy);
+  const offers = useAppStore((state) => state.offers);
+  const rentedInstances = useAppStore((state) => state.rentedInstances);
+  const embeddedMoonlightStatus = useAppStore(
+    (state) => state.embeddedMoonlightStatus,
+  );
+  const searchingOffers = useAppStore((state) => state.searching);
+  const offersPage = useAppStore((state) => state.offersPage);
+  const offersHasNextPage = useAppStore((state) => state.offersHasNextPage);
+  const instanceActionRunning = useAppStore(
+    (state) => state.instanceActionRunning,
+  );
+
+  const blockingAction = useAppStore((state) => state.blockingAction);
+  const runOnboarding = useAppStore((state) => state.runOnboarding);
+  const vastWalletSummary = useAppStore((state) => state.vastWalletSummary);
+  const refreshVastWalletSummary = useAppStore(
+    (state) => state.refreshVastWalletSummary,
+  );
+  const discoverOffers = useAppStore((state) => state.discoverOffers);
+  const nextOffersPage = useAppStore((state) => state.nextOffersPage);
+  const previousOffersPage = useAppStore((state) => state.previousOffersPage);
+  const saveManualLocation = useAppStore((state) => state.saveManualLocation);
+  const loadRentedInstances = useAppStore((state) => state.loadRentedInstances);
+  const chooseOffer = useAppStore((state) => state.chooseOffer);
+  const startPlay = useAppStore((state) => state.startPlay);
+  const resumeProvisioningExisting = useAppStore(
+    (state) => state.resumeProvisioningExisting,
+  );
+  const startPlayExisting = useAppStore((state) => state.startPlayExisting);
+  const launchLibrary = useAppStore((state) => state.launchLibrary);
+  const launchLibraryLoading = useAppStore((state) => state.launchLibraryLoading);
+  const launchSoftwareJob = useAppStore((state) => state.launchSoftwareJob);
+  const launchingSoftwareAppId = useAppStore(
+    (state) => state.launchingSoftwareAppId,
+  );
+  const softwareArtwork = useAppStore((state) => state.softwareArtwork);
+  const softwareArtworkLoading = useAppStore(
+    (state) => state.softwareArtworkLoading,
+  );
+  const loadInstanceLaunchLibrary = useAppStore(
+    (state) => state.loadInstanceLaunchLibrary,
+  );
+  const launchInstanceSoftware = useAppStore(
+    (state) => state.launchInstanceSoftware,
+  );
+  const pollLaunchSoftwareJob = useAppStore(
+    (state) => state.pollLaunchSoftwareJob,
+  );
+  const loadSoftwareArtwork = useAppStore(
+    (state) => state.loadSoftwareArtwork,
+  );
+  const clearLaunchLibrary = useAppStore((state) => state.clearLaunchLibrary);
+  const saveServerPreferences = useAppStore(
+    (state) => state.saveServerPreferences,
+  );
+  const loadAvailableOfferCountries = useAppStore(
+    (state) => state.loadAvailableOfferCountries,
+  );
+  const systemHealth = useAppStore((state) => state.systemHealth);
+  const healthChecking = useAppStore((state) => state.healthChecking);
+  const lastDiagnosticReport = useAppStore((state) => state.lastDiagnosticReport);
+  const refreshSystemHealth = useAppStore((state) => state.refreshSystemHealth);
+  const exportCrashReport = useAppStore((state) => state.exportCrashReport);
+
+  const setEmbeddedMoonlightPipelineEnabled = useAppStore(
+    (state) => state.setEmbeddedMoonlightPipelineEnabled,
+  );
+  const loadEmbeddedMoonlightStatus = useAppStore(
+    (state) => state.loadEmbeddedMoonlightStatus,
+  );
+
+  useEffect(() => {
+    if (!embeddedMoonlightStatus?.enabled) {
+      return;
+    }
+
+    const interval = window.setInterval(() => {
+      void loadEmbeddedMoonlightStatus(embeddedMoonlightStatus.instanceId);
+    }, 1000);
+
+    return () => {
+      window.clearInterval(interval);
+    };
+  }, [embeddedMoonlightStatus?.enabled, embeddedMoonlightStatus?.instanceId, loadEmbeddedMoonlightStatus]);
+
+
+  const rebootInstanceServices = useAppStore(
+    (state) => state.rebootInstanceServices,
+  );
+  const destroyInstance = useAppStore((state) => state.destroyInstance);
+  const syncInstanceStorage = useAppStore((state) => state.syncInstanceStorage);
+  const listSyncableStorageObjects = useAppStore(
+    (state) => state.listSyncableStorageObjects,
+  );
+  const saveInstanceStorageSelected = useAppStore(
+    (state) => state.saveInstanceStorageSelected,
+  );
+  const listExportableStorageObjects = useAppStore(
+    (state) => state.listExportableStorageObjects,
+  );
+  const uploadPathsToRemoteInstance = useAppStore(
+    (state) => state.uploadPathsToRemoteInstance,
+  );
+
+  if (!appState) {
+    return null;
+  }
+
+  if (!appState.onboardingCompleted) {
+    return (
+      <OnboardingScreen busy={busy} onSubmit={runOnboarding} />
+    );
+  }
+
+  return (
+    <DashboardScreen
+      appState={appState}
+      offers={offers}
+      rentedInstances={rentedInstances}
+      embeddedMoonlightStatus={embeddedMoonlightStatus}
+      searchingOffers={searchingOffers}
+      offersPage={offersPage}
+      offersHasNextPage={offersHasNextPage}
+      busy={busy}
+      instanceActionRunning={instanceActionRunning}
+      blockingAction={blockingAction}
+      vastWalletSummary={vastWalletSummary}
+      onSearchOffers={discoverOffers}
+      onLoadAvailableOfferCountries={loadAvailableOfferCountries}
+      systemHealth={systemHealth}
+      healthChecking={healthChecking}
+      lastDiagnosticReport={lastDiagnosticReport}
+      onRefreshSystemHealth={refreshSystemHealth}
+      onExportCrashReport={exportCrashReport}
+      onNextOffersPage={nextOffersPage}
+      onPreviousOffersPage={previousOffersPage}
+      onManualLocationSave={saveManualLocation}
+      onLoadRentedInstances={loadRentedInstances}
+      onRefreshVastWalletSummary={refreshVastWalletSummary}
+      onResumeProvisioningExisting={resumeProvisioningExisting}
+      onStartPlayExisting={startPlayExisting}
+      launchLibrary={launchLibrary}
+      launchLibraryLoading={launchLibraryLoading}
+      launchSoftwareJob={launchSoftwareJob}
+      launchingSoftwareAppId={launchingSoftwareAppId}
+      softwareArtwork={softwareArtwork}
+      softwareArtworkLoading={softwareArtworkLoading}
+      onLoadInstanceLaunchLibrary={loadInstanceLaunchLibrary}
+      onLaunchInstanceSoftware={launchInstanceSoftware}
+      onPollLaunchSoftwareJob={pollLaunchSoftwareJob}
+      onLoadSoftwareArtwork={loadSoftwareArtwork}
+      onClearLaunchLibrary={clearLaunchLibrary}
+      onSelectOffer={chooseOffer}
+      onStartPlay={startPlay}
+      onSaveServerPreferences={saveServerPreferences}
+      onSetEmbeddedMoonlightPipelineEnabled={setEmbeddedMoonlightPipelineEnabled}
+      onLoadEmbeddedMoonlightStatus={loadEmbeddedMoonlightStatus}
+      onRebootInstanceServices={rebootInstanceServices}
+      onDestroyInstance={destroyInstance}
+      onSaveInstanceStorageSelected={saveInstanceStorageSelected}
+      onSyncInstanceStorage={syncInstanceStorage}
+      onListSyncableStorageObjects={listSyncableStorageObjects}
+      onListExportableStorageObjects={listExportableStorageObjects}
+      onUploadPathsToInstance={uploadPathsToRemoteInstance}
+      onRefreshIndexing={async (instanceId?: number) => {
+        if (!instanceId) {
+          return;
+        }
+        await refreshStateAgentIndex(instanceId);
+      }}
+    />
+  );
+}
+
+function ProvisioningRoute() {
+  const appState = useAppStore((state) => state.appState);
+  const logs = useAppStore((state) => state.logs);
+  const busy = useAppStore((state) => state.busy);
+  const blockingAction = useAppStore((state) => state.blockingAction);
+  const provisioningModalDismissed = useAppStore(
+    (state) => state.provisioningModalDismissed,
+  );
+  const dismissProvisioningModal = useAppStore(
+    (state) => state.dismissProvisioningModal,
+  );
+  const reopenProvisioningModal = useAppStore(
+    (state) => state.reopenProvisioningModal,
+  );
+  const setupWireguardAppHandoff = useAppStore(
+    (state) => state.setupWireguardAppHandoff,
+  );
+
+  const setupMoonlightSunshine = useAppStore(
+    (state) => state.setupMoonlightSunshine,
+  );
+  const activeMoonlightPairing = useAppStore(
+    (state) => state.activeMoonlightPairing,
+  );
+  const prepareEmbeddedMoonlightPairing = useAppStore(
+    (state) => state.prepareEmbeddedMoonlightPairing,
+  );
+  const completeEmbeddedMoonlightPairing = useAppStore(
+    (state) => state.completeEmbeddedMoonlightPairing,
+  );
+  const retrySetupStage = useAppStore((state) => state.retrySetupStage);
+  const sleepPreventionActive = useAppStore(
+    (state) => state.sleepPreventionActive,
+  );
+  const startSleepPrevention = useAppStore(
+    (state) => state.startSleepPrevention,
+  );
+  const stopSleepPrevention = useAppStore((state) => state.stopSleepPrevention);
+  const stopProvisioningAfterCurrentStage = useAppStore(
+    (state) => state.stopProvisioningAfterCurrentStage,
+  );
+
+  if (!appState) {
+    return null;
+  }
+
+  if (!appState.onboardingCompleted) {
+    return <Navigate to="/" replace />;
+  }
+
+  const provisioningInstanceId =
+    appState.postWireguardSetup.currentInstanceId ?? appState.instance.instanceId;
+
+  return (
+    <ProvisioningScreen
+      appState={appState}
+      logs={logs}
+      busy={busy}
+      provisioningModalDismissed={provisioningModalDismissed}
+      onDismissProvisioningModal={dismissProvisioningModal}
+      onStopProvisioning={stopProvisioningAfterCurrentStage}
+      onReopenProvisioningModal={reopenProvisioningModal}
+      blockingAction={blockingAction}
+      onSetupWireguardAppHandoff={setupWireguardAppHandoff}
+      onSetupMoonlightSunshine={setupMoonlightSunshine}
+      activeMoonlightPairing={activeMoonlightPairing}
+      onPrepareMoonlightPairingHandoff={() => {
+        if (!provisioningInstanceId) {
+          return Promise.resolve(null);
+        }
+        return prepareEmbeddedMoonlightPairing(provisioningInstanceId);
+      }}
+      onCompleteMoonlightPairingHandoff={(sessionId) => {
+        if (!provisioningInstanceId) {
+          return Promise.resolve(null);
+        }
+        return completeEmbeddedMoonlightPairing(
+          provisioningInstanceId,
+          sessionId,
+        );
+      }}
+      onRetrySetupStage={retrySetupStage}
+      sleepPreventionActive={sleepPreventionActive}
+      onStartSleepPrevention={startSleepPrevention}
+      onStopSleepPrevention={stopSleepPrevention}
+    />
+  );
+}
+
+function UpdateAvailableModal({
+  update,
+  onDismiss,
+}: {
+  update: AppUpdateInfo;
+  onDismiss: () => void;
+}) {
+  const [progress, setProgress] = useState<AppUpdateProgress | null>(null);
+  const [installError, setInstallError] = useState<string | null>(null);
+  const releaseDate = update.publishedAt
+    ? new Date(update.publishedAt).toLocaleDateString()
+    : null;
+
+  async function installUpdate() {
+    setInstallError(null);
+    try {
+      await installPendingAppUpdate(setProgress);
+    } catch (error) {
+      setProgress(null);
+      setInstallError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  return (
+    <ModalFrame panelClassName="glass-panel pixel-frame max-w-xl" zIndexClassName="z-[120]">
+      <div className="flex shrink-0 items-center justify-between border-b-2 border-[#3e4270] px-5 py-4">
+        <div>
+          <h2
+            className="pixel-heading glitch-title font-display text-sm text-white md:text-base"
+            data-text={translate("generated.5ae200f91c64da48")}
+          >
+            {translate("generated.5ae200f91c64da48")}
+          </h2>
+            <p className="text-[1.15rem] leading-none text-[#b4c8de]">
+             {translate("generated.939edfedc701440a")} {update.latestVersion} {translate("generated.37cb959efa7c6035")}
+          </p>
+        </div>
+        <Button variant="ghost" onClick={onDismiss} disabled={progress !== null}>
+          {translate("generated.73b6e48a1b552d11")}
+        </Button>
+      </div>
+
+      <ModalBody className="px-5 py-4">
+        <Card className="text-[1.2rem] text-[#c6dbf4]">
+          <div className="grid gap-2">
+            <p>
+              {translate("generated.0dd606e783fc3ffa")} <span className="text-[#9ad9ff]">{update.currentVersion}</span>
+            </p>
+            <p>
+              {translate("generated.df6e756fc120eb45")} <span className="text-neon-lime">{update.latestVersion}</span>
+            </p>
+            {releaseDate && <p>{translate("generated.806da0ed547eb206")} {releaseDate}</p>}
+          </div>
+
+          <div className="mt-4 max-h-48 overflow-y-auto whitespace-pre-wrap border border-[#3e4270] bg-[#070b1b] p-3 text-[1.05rem] leading-snug text-[#b4c8de]">
+            {update.releaseNotes}
+          </div>
+          {progress && (
+            <div className="mt-4 space-y-2">
+              <div className="flex justify-between text-[1.05rem] text-[#9ad9ff]">
+                <span>{progress.phase === "downloading" ? translate("generated.01436823867550f9") : progress.phase === "installing" ? translate("generated.572b4e4107ee207d") : translate("generated.315f0d627222fee0")}</span>
+                <span>{progress.percent != null ? `${progress.percent}%` : translate("generated.b93900bded315d04")}</span>
+              </div>
+              <div className="h-2 overflow-hidden rounded bg-[#171d35]">
+                <div className={`h-full bg-neon-cyan transition-[width] ${progress.percent == null ? "w-1/3 animate-pulse" : ""}`} style={progress.percent != null ? { width: `${progress.percent}%` } : undefined} />
+              </div>
+            </div>
+          )}
+          {installError && <p className="mt-4 border border-red-500/30 bg-red-900/20 p-3 text-sm text-red-300">{installError}</p>}
+        </Card>
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3">
+          <SocialLinks />
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={onDismiss} disabled={progress !== null}>
+              {translate("generated.b58eb52c8810b978")}
+            </Button>
+            <Button
+              variant="secondary"
+              loading={progress !== null}
+              loadingText={progress?.phase === "installing" ? translate("generated.07ae7fd684564e68") : translate("generated.f976eb284ebb156b")}
+              onClick={installUpdate}
+            >
+              {translate("generated.b1a21af734bf97f5")}
+            </Button>
+          </div>
+        </div>
+      </ModalBody>
+    </ModalFrame>
+  );
+}
+
+function BootScreen() {
+  return (
+    <main className="crt-surface flex min-h-dvh items-center justify-center bg-hero-glow px-4">
+      <Card className="pixel-frame animate-fade-in p-6 text-center">
+        <img
+          src={appLogo}
+          alt={translate("generated.9b455e14fd50b59b")}
+          className="mx-auto mb-4 max-h-40 w-auto border border-[#3d426f]"
+        />
+        <p
+          className="pixel-heading glitch-title font-display text-sm text-neon-cyan md:text-base"
+          data-text={translate("generated.c1c50ca3cce58dfd")}
+        >
+          {translate("generated.c1c50ca3cce58dfd")}
+        </p>
+      </Card>
+    </main>
+  );
+}
+
+const AUTO_GITHUB_ISSUES_STORAGE_KEY = "noland.autoGithubIssues";
+
+function CloseWithInstancesModal({
+  instances,
+  deleting,
+  error,
+  onContinue,
+  onQuit,
+  onDeleteAll,
+  onSetupStorage,
+}: {
+  instances: number;
+  deleting: boolean;
+  error: string | null;
+  onContinue: () => void;
+  onQuit: () => void;
+  onDeleteAll: () => void;
+  onSetupStorage: () => void;
+}) {
+  return (
+    <ModalFrame panelClassName="glass-panel pixel-frame max-w-2xl" zIndexClassName="z-[140]">
+      <div className="border-b-2 border-[#9a6536] px-5 py-4">
+        <h2 className="pixel-heading glitch-title font-display text-base text-[#ffd3a3]" data-text={translate("generated.7a9be85b62a5b21e")}>
+          {translate("generated.7a9be85b62a5b21e")}
+        </h2>
+        <p className="mt-2 text-[1.15rem] leading-snug text-[#d7e6f7]">
+          {translate("generated.af3f12e161fdb1cb")} {instances} {translate("generated.16c237378e5229bd")}{instances === 1 ? "" : translate("generated.043a718774c572bd")}{translate("generated.c46da1442255e3e3")}
+        </p>
+      </div>
+      <ModalBody className="space-y-4 px-5 py-5">
+        <Card className="border border-[#9a6536] bg-[#3a2518]/60 text-[1.1rem] text-[#ffd3a3]">
+          {translate("generated.e05b165fa8ba1860")}
+        </Card>
+        {error && <p className="border border-red-500/40 bg-red-900/20 p-3 text-red-300">{translateSource(error)}</p>}
+        <div className="grid gap-2 sm:grid-cols-2">
+          <Button variant="primary" onClick={onContinue} disabled={deleting}>{translate("generated.cebf67179355de75")}</Button>
+          <Button variant="danger" onClick={onQuit} disabled={deleting}>{translate("generated.8dcbacdad165ed77")}</Button>
+          <Button variant="secondary" onClick={onDeleteAll} loading={deleting} loadingText={translate("generated.d8edf41e0541ecf4")}>
+            {translate("generated.d83cd3e78affba6d")}
+          </Button>
+          <Button variant="ghost" onClick={onSetupStorage} disabled={deleting}>{translate("generated.5539df1fa82ec53e")}</Button>
+        </div>
+      </ModalBody>
+    </ModalFrame>
+  );
+}
+
+export function App() {
+  // Subscribe the application tree so statically translated copy refreshes
+  // immediately when the user changes locale.
+  useLocalization();
+  const [windowLabel, setWindowLabel] = useState<string | null>(null);
+  const [windowLabelResolved, setWindowLabelResolved] = useState(false);
+  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateInfo | null>(null);
+  const [closeGuardOpen, setCloseGuardOpen] = useState(false);
+  const [deletingBeforeClose, setDeletingBeforeClose] = useState(false);
+  const [closeGuardError, setCloseGuardError] = useState<string | null>(null);
+  const attentionNotificationAtRef = useRef<number | null>(null);
+  const [autoGithubIssuesEnabled, setAutoGithubIssuesEnabled] = useState(() => {
+    try {
+      return window.localStorage.getItem(AUTO_GITHUB_ISSUES_STORAGE_KEY) === "true";
+    } catch {
+      return false;
+    }
+  });
+  const lastAutoIssueErrorRef = useRef<string | null>(null);
+  const initialize = useAppStore((state) => state.initialize);
+  const bindEvents = useAppStore((state) => state.bindEvents);
+  const loading = useAppStore((state) => state.loading);
+  const error = useAppStore((state) => state.error);
+  const clearError = useAppStore((state) => state.clearError);
+  const exportCrashReport = useAppStore((state) => state.exportCrashReport);
+  const lastDiagnosticReport = useAppStore((state) => state.lastDiagnosticReport);
+  const systemHealth = useAppStore((state) => state.systemHealth);
+  const blockingAction = useAppStore((state) => state.blockingAction);
+  const isBlocking = useAppStore((state) => state.isBlocking);
+  const cancelSharedStorageOperation = useAppStore(
+    (state) => state.cancelSharedStorageOperation,
+  );
+  const appState = useAppStore((state) => state.appState);
+  const busy = useAppStore((state) => state.busy);
+  const saveVastApiKey = useAppStore((state) => state.saveVastApiKey);
+  const rentedInstances = useAppStore((state) => state.rentedInstances);
+  const embeddedMoonlightStatus = useAppStore((state) => state.embeddedMoonlightStatus);
+  const destroyInstance = useAppStore((state) => state.destroyInstance);
+
+  const savePlatformCredentials = useAppStore(
+    (state) => state.savePlatformCredentials,
+  );
+  const saveIgdbCredentials = useAppStore((state) => state.saveIgdbCredentials);
+  const saveAutoShutdownSettings = useAppStore(
+    (state) => state.saveAutoShutdownSettings,
+  );
+  const saveServerPreferences = useAppStore(
+    (state) => state.saveServerPreferences,
+  );
+  const saveMoonlightPreferences = useAppStore(
+    (state) => state.saveMoonlightPreferences,
+  );
+  const saveSshCredentials = useAppStore((state) => state.saveSshCredentials);
+  const cloudflareTurnSettings = useAppStore((state) => state.cloudflareTurnSettings);
+  const cloudflareTurnTestResult = useAppStore((state) => state.cloudflareTurnTestResult);
+  const loadCloudflareTurnSettings = useAppStore((state) => state.loadCloudflareTurnSettings);
+  const testCloudflareTurnSettings = useAppStore((state) => state.testCloudflareTurnSettings);
+  const saveCloudflareTurnSettings = useAppStore((state) => state.saveCloudflareTurnSettings);
+  const clearCloudflareTurnSettings = useAppStore((state) => state.clearCloudflareTurnSettings);
+  const regenerateEdid = useAppStore((state) => state.regenerateEdid);
+  const storageProviders = useAppStore((state) => state.storageProviders);
+  const sharedStorageProfiles = useAppStore(
+    (state) => state.sharedStorageProfiles,
+  );
+  const sharedStorageTestResult = useAppStore(
+    (state) => state.sharedStorageTestResult,
+  );
+  const loadStorageProviders = useAppStore(
+    (state) => state.loadStorageProviders,
+  );
+  const connectStorageProvider = useAppStore(
+    (state) => state.connectStorageProvider,
+  );
+  const testStorageConnection = useAppStore(
+    (state) => state.testStorageConnection,
+  );
+  const loadSharedStorageProfiles = useAppStore(
+    (state) => state.loadSharedStorageProfiles,
+  );
+  const setActiveStorageProfile = useAppStore(
+    (state) => state.setActiveStorageProfile,
+  );
+  const disconnectStorageProfile = useAppStore(
+    (state) => state.disconnectStorageProfile,
+  );
+  const oauthSessionId = useAppStore((state) => state.oauthSessionId);
+  const beginOauthFlow = useAppStore((state) => state.beginOauthFlow);
+  const completeOauthFlow = useAppStore((state) => state.completeOauthFlow);
+  const cancelOauthFlow = useAppStore((state) => state.cancelOauthFlow);
+  const provisioningStopRequested = useAppStore(
+    (state) => state.provisioningStopRequested,
+  );
+  const stopProvisioningAfterCurrentStage = useAppStore(
+    (state) => state.stopProvisioningAfterCurrentStage,
+  );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function resolveWindowLabel() {
+      if (!("__TAURI_INTERNALS__" in window)) {
+        if (!cancelled) {
+          setWindowLabel("main");
+          setWindowLabelResolved(true);
+        }
+        return;
+      }
+      try {
+        const currentWindow = getCurrentWindow();
+        if (!cancelled) {
+          setWindowLabel(currentWindow.label);
+          setWindowLabelResolved(true);
+        }
+      } catch {
+        if (!cancelled) {
+          setWindowLabel("main");
+          setWindowLabelResolved(true);
+        }
+      }
+    }
+
+    void resolveWindowLabel();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel === "moonlight-stream") {
+      return;
+    }
+    void initialize();
+    void bindEvents();
+  }, [bindEvents, initialize, windowLabel, windowLabelResolved]);
+
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel !== "main" || loading) {
+      return;
+    }
+
+    const currentWindow = getCurrentWindow();
+    const unlistenPromise = currentWindow.onCloseRequested((event) => {
+      if (rentedInstances.length === 0) {
+        return;
+      }
+      event.preventDefault();
+      setCloseGuardError(null);
+      setCloseGuardOpen(true);
+    });
+
+    return () => {
+      void unlistenPromise.then((unlisten) => unlisten());
+    };
+  }, [loading, rentedInstances.length, windowLabel, windowLabelResolved]);
+
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel !== "main" || loading || !isRunningInTauri()) {
+      return;
+    }
+
+    const hasEmbeddedActiveStream =
+      embeddedMoonlightStatus?.videoSessionActive === true ||
+      rentedInstances.some((instance) => instance.embeddedMoonlightVideoSessionActive === true);
+    const activeSessionStates = new Set([
+      "preparing",
+      "launching",
+      "creating_surface",
+      "connecting",
+      "streaming",
+      "reconnecting",
+      "stopping",
+    ]);
+    let checking = false;
+
+    const checkForInstancesNeedingAttention = async () => {
+      if (checking) {
+        return;
+      }
+      checking = true;
+      let hasNativeActiveStream = false;
+      try {
+        const session = await moonlightGetSessionState();
+        hasNativeActiveStream = activeSessionStates.has(session.state);
+      } catch {
+        // Avoid a false billing warning when native stream state cannot be read.
+        checking = false;
+        return;
+      }
+
+      if (rentedInstances.length === 0 || hasEmbeddedActiveStream || hasNativeActiveStream) {
+        attentionNotificationAtRef.current = null;
+        checking = false;
+        return;
+      }
+
+      const now = Date.now();
+      if (
+        attentionNotificationAtRef.current === null ||
+        now - attentionNotificationAtRef.current >= 3 * 60 * 60 * 1000
+      ) {
+        attentionNotificationAtRef.current = now;
+        void notifyInstancesNeedAttention(rentedInstances.length);
+      }
+      checking = false;
+    };
+
+    void checkForInstancesNeedingAttention();
+    const interval = window.setInterval(() => void checkForInstancesNeedingAttention(), 60 * 1000);
+    return () => window.clearInterval(interval);
+  }, [
+    embeddedMoonlightStatus?.videoSessionActive,
+    loading,
+    rentedInstances,
+    windowLabel,
+    windowLabelResolved,
+  ]);
+
+  async function quitWindow() {
+    setCloseGuardError(null);
+    setCloseGuardOpen(false);
+    try {
+      await exitApp(0);
+    } catch (error) {
+      setCloseGuardError(error instanceof Error ? error.message : String(error));
+      setCloseGuardOpen(true);
+    }
+  }
+
+  async function deleteAllAndQuit() {
+    setDeletingBeforeClose(true);
+    setCloseGuardError(null);
+    try {
+      for (const instance of rentedInstances) {
+        await destroyInstance(instance.instanceId);
+      }
+      await quitWindow();
+    } catch (error) {
+      setCloseGuardError(error instanceof Error ? error.message : String(error));
+      setDeletingBeforeClose(false);
+    }
+  }
+
+  function openSharedStorageFromCloseGuard() {
+    setCloseGuardOpen(false);
+    window.location.hash = "#/settings?section=storage";
+  }
+
+
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel === "moonlight-stream") {
+      return;
+    }
+
+    const handleWindowError = (event: ErrorEvent) => {
+      const details = `${event.message}\n${event.filename}:${event.lineno}:${event.colno}\n${event.error?.stack ?? ""}`.trim();
+      void exportCrashReport("frontend.window-error", details);
+    };
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason instanceof Error
+        ? `${event.reason.name}: ${event.reason.message}\n${event.reason.stack ?? ""}`
+        : JSON.stringify(event.reason, null, 2);
+      void exportCrashReport("frontend.unhandled-rejection", reason);
+    };
+
+    window.addEventListener("error", handleWindowError);
+    window.addEventListener("unhandledrejection", handleUnhandledRejection);
+
+    return () => {
+      window.removeEventListener("error", handleWindowError);
+      window.removeEventListener("unhandledrejection", handleUnhandledRejection);
+    };
+  }, [exportCrashReport, windowLabel, windowLabelResolved]);
+
+  useEffect(() => {
+    if (!windowLabelResolved || windowLabel === "moonlight-stream") {
+      return;
+    }
+
+    let cancelled = false;
+    let checking = false;
+    async function checkForUpdate() {
+      if (checking) return;
+      checking = true;
+      try {
+        const update = await checkForAppUpdate();
+        if (!cancelled && update) {
+          setAvailableUpdate(update);
+        }
+      } catch (error) {
+        console.warn("Update check failed", error);
+      } finally {
+        checking = false;
+      }
+    }
+
+    void checkForUpdate();
+    const interval = window.setInterval(() => void checkForUpdate(), 15 * 60 * 1000);
+    window.addEventListener("focus", checkForUpdate);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", checkForUpdate);
+    };
+  }, [windowLabel, windowLabelResolved]);
+
+  async function openCrashIssue(reason: string, errorMessage?: string | null) {
+    const report = await exportCrashReport(reason, errorMessage ?? undefined);
+    if (!report) {
+      return;
+    }
+    await openUrl(
+      buildDiagnosticIssueUrl({
+        report,
+        reason,
+        error: errorMessage,
+        health: systemHealth,
+      }),
+    );
+  }
+
+  function toggleAutoGithubIssues() {
+    setAutoGithubIssuesEnabled((enabled) => {
+      const next = !enabled;
+      try {
+        window.localStorage.setItem(AUTO_GITHUB_ISSUES_STORAGE_KEY, String(next));
+      } catch {
+        // Ignore storage failures; keep the in-memory toggle for this session.
+      }
+      return next;
+    });
+  }
+
+  useEffect(() => {
+    if (!autoGithubIssuesEnabled || !error) {
+      return;
+    }
+
+    if (lastAutoIssueErrorRef.current === error) {
+      return;
+    }
+
+    lastAutoIssueErrorRef.current = error;
+    void openCrashIssue("auto-error", error);
+  }, [autoGithubIssuesEnabled, error]);
+
+  if (!windowLabelResolved) {
+    return <BootScreen />;
+  }
+
+  if (windowLabel === "moonlight-stream") {
+    return <StreamWindowScreen />;
+  }
+
+  if (loading) {
+    return <BootScreen />;
+  }
+
+  return (
+    <>
+      {error && (
+        <div className="fixed right-4 top-4 z-[100] max-w-md border-2 border-[#ff687d] bg-[#431a28] px-4 py-3 text-[1.2rem] text-[#ffd3dc] shadow-[0_0_0_2px_#090a17,inset_0_0_0_2px_#60243a]">
+          <div className="flex items-start justify-between gap-3">
+            <p className="break-words break-all">{translateSource(error)}</p>
+            <div className="flex shrink-0 flex-col items-end gap-2">
+              <button
+                className="font-display text-[10px] uppercase tracking-[0.12em]"
+                onClick={() => void openCrashIssue("error-toast", error)}
+                type="button"
+              >
+                {translate("generated.7d94e2e7acad3b70")}
+              </button>
+              <button
+                className="font-display text-[10px] uppercase tracking-[0.12em]"
+                onClick={toggleAutoGithubIssues}
+                type="button"
+                title={translate("generated.6a3dfee4b30efe35")}
+              >
+                {translate("generated.afa8c6d0eac55073")} {autoGithubIssuesEnabled ? translate("generated.b8d31e852725afb1") : translate("generated.b4dc66dde806261b")}
+              </button>
+              <button
+                className="font-display text-[10px] uppercase tracking-[0.12em]"
+                onClick={clearError}
+                type="button"
+              >
+                {translate("generated.48845bff334a50a5")}
+              </button>
+            </div>
+          </div>
+          {lastDiagnosticReport && (
+            <p className="mt-2 break-all text-[0.95rem] text-[#ffc1cf]">
+              {translate("generated.0a90864de9a6575f")} {lastDiagnosticReport.path}
+            </p>
+          )}
+        </div>
+      )}
+
+      {availableUpdate && (
+        <UpdateAvailableModal
+          update={availableUpdate}
+          onDismiss={() => setAvailableUpdate(null)}
+        />
+      )}
+
+      {closeGuardOpen && (
+        <CloseWithInstancesModal
+          instances={rentedInstances.length}
+          deleting={deletingBeforeClose}
+          error={closeGuardError}
+          onContinue={() => setCloseGuardOpen(false)}
+          onQuit={() => void quitWindow()}
+          onDeleteAll={() => void deleteAllAndQuit()}
+          onSetupStorage={openSharedStorageFromCloseGuard}
+        />
+      )}
+
+      {isBlocking && blockingAction && (
+        <BlockingLoaderOverlay
+          action={blockingAction}
+          onCancel={
+            blockingAction.instanceId != null
+              ? () => {
+                  void cancelSharedStorageOperation(blockingAction.instanceId as number);
+                }
+              : undefined
+          }
+          onStopProvisioning={
+            blockingAction.key === "provisioning.flow"
+              ? () => void stopProvisioningAfterCurrentStage()
+              : undefined
+          }
+          stopRequested={provisioningStopRequested}
+        />
+      )}
+
+      {!isBlocking && blockingAction &&
+        (blockingAction.key === "instance.storage.sync" ||
+          blockingAction.key === "instance.storage.export" ||
+          blockingAction.key === "instance.files.upload") && (
+        <div className="pointer-events-none fixed bottom-4 right-4 z-[105] w-[min(24rem,calc(100vw-2rem))]">
+          <BlockingLoaderOverlay
+            action={blockingAction}
+            inline
+            className="pointer-events-auto p-4"
+            onCancel={
+              blockingAction.instanceId != null
+                ? () => void cancelSharedStorageOperation(blockingAction.instanceId as number)
+                : undefined
+            }
+          />
+        </div>
+      )}
+
+      <HashRouter>
+        <Routes>
+          <Route path="/" element={<RootRoute />} />
+          <Route path="/provisioning" element={<ProvisioningRoute />} />
+          <Route
+            path="/settings"
+            element={
+              appState?.onboardingCompleted ? (
+                <SettingsScreen
+                  appState={appState}
+                  busy={busy}
+                  storageProviders={storageProviders}
+                  sharedStorageProfiles={sharedStorageProfiles}
+                  sharedStorageTestResult={sharedStorageTestResult}
+                  onLoadStorageProviders={loadStorageProviders}
+                  onConnectStorageProvider={connectStorageProvider}
+                  onTestStorageConnection={testStorageConnection}
+                  onLoadSharedStorageProfiles={loadSharedStorageProfiles}
+                  onSetActiveStorageProfile={setActiveStorageProfile}
+                  onDisconnectStorageProfile={disconnectStorageProfile}
+                  oauthSessionId={oauthSessionId}
+                  onBeginOauthFlow={beginOauthFlow}
+                  onCompleteOauthFlow={completeOauthFlow}
+                  onCancelOauthFlow={cancelOauthFlow}
+                  onSaveApiKey={saveVastApiKey}
+                  onSavePlatformCredentials={savePlatformCredentials}
+                  onSaveIgdbCredentials={saveIgdbCredentials}
+                  onSaveAutoShutdownSettings={saveAutoShutdownSettings}
+                  onSaveServerPreferences={saveServerPreferences}
+                  onSaveMoonlightPreferences={saveMoonlightPreferences}
+                  onSaveSshCredentials={saveSshCredentials}
+                  cloudflareTurnSettings={cloudflareTurnSettings}
+                  cloudflareTurnTestResult={cloudflareTurnTestResult}
+                  onLoadCloudflareTurnSettings={loadCloudflareTurnSettings}
+                  onTestCloudflareTurnSettings={testCloudflareTurnSettings}
+                  onSaveCloudflareTurnSettings={saveCloudflareTurnSettings}
+                  onClearCloudflareTurnSettings={clearCloudflareTurnSettings}
+                  onRegenerateEdid={regenerateEdid}
+                />
+              ) : (
+                <Navigate to="/" replace />
+              )
+            }
+          />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </HashRouter>
+    </>
+  );
+}

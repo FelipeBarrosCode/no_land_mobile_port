@@ -1,0 +1,1712 @@
+use std::{
+    env,
+    net::{SocketAddr, TcpStream, ToSocketAddrs},
+    path::{Path, PathBuf},
+    time::Duration,
+};
+
+use crate::{
+    errors::{AppError, AppResult},
+    models::{
+        app_state::{
+            OrchestrationState, PostWireGuardSetupState, SetupErrorState, SetupStage,
+            WireGuardSetupMode, WireGuardSetupStatus,
+        },
+        events::ProvisioningEvent,
+    },
+};
+use serde::{Deserialize, Serialize};
+use tauri::AppHandle;
+use tokio::time::{sleep, timeout};
+use tracing::{info, warn};
+
+use super::{
+    app_context::AppContext,
+    remote_exec::RemoteExec,
+    ssh_keys::SshKeyService,
+    wireguard::{
+        reconnect_local_wireguard_client, setup_local_wireguard_client,
+        verify_managed_gotatun_tunnel,
+    },
+    wireguard_mtu::tune_connected_tunnel,
+};
+
+const TUNNEL_HOST: &str = "10.77.0.1";
+const SUNSHINE_API_PORT: u16 = 47990;
+const REACHABILITY_PORTS: [u16; 3] = [47990, 47989, 47984];
+
+const SUNSHINE_API_READY_RETRIES: usize = 60;
+const SUNSHINE_API_READY_POLL_INTERVAL: Duration = Duration::from_secs(2);
+const SUNSHINE_TLS_RENEW_THRESHOLD_DAYS: i64 = 30;
+const SUNSHINE_PRE_PIN_VERIFY_TIMEOUT: Duration = Duration::from_secs(300);
+const SUNSHINE_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+const SUNSHINE_PIN_SUBMISSION_ATTEMPTS: usize = 3;
+const SUNSHINE_PIN_RETRY_DELAY: Duration = Duration::from_millis(350);
+const SUNSHINE_VERIFY_HTTP_ATTEMPTS: usize = 5;
+const SUNSHINE_VERIFY_HTTP_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+fn sunshine_http_client() -> AppResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .timeout(SUNSHINE_HTTP_TIMEOUT)
+        .danger_accept_invalid_certs(true)
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .build()
+        .map_err(|error| AppError::Command(format!("Failed building Sunshine client: {error}")))
+}
+
+fn sunshine_api_url(host: &str, path: &str) -> String {
+    format!("https://{}:{}{}", host, SUNSHINE_API_PORT, path)
+}
+
+fn sunshine_manual_login_instructions(host: &str, username: &str, password: &str) -> String {
+    format!(
+        "If this step hangs or the Sunshine API is not responding, open the Sunshine web UI manually at https://{host}:{port}/ and try logging in there first. Then come back and retry. Current Sunshine host: {host} | port: {port} | username: {username} | password: {password}",
+        host = host,
+        port = SUNSHINE_API_PORT,
+        username = username,
+        password = password,
+    )
+}
+
+#[derive(Debug, Clone)]
+struct SunshineApiResponse {
+    status: reqwest::StatusCode,
+    location: Option<String>,
+    body: Option<String>,
+    json_status: Option<bool>,
+    json_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SunshinePinResponseBody {
+    status: Option<bool>,
+    error: Option<String>,
+}
+
+fn parse_sunshine_pin_response_body(body: Option<&str>) -> (Option<bool>, Option<String>) {
+    let parsed = body.and_then(|text| serde_json::from_str::<SunshinePinResponseBody>(text).ok());
+    (
+        parsed.as_ref().and_then(|json| json.status),
+        parsed.and_then(|json| json.error),
+    )
+}
+
+impl SunshineApiResponse {
+    fn welcome_redirect(&self) -> bool {
+        self.status.is_redirection()
+            && self
+                .location
+                .as_deref()
+                .map(|location| location.contains("/welcome"))
+                .unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReachabilityResult {
+    pub reachable: bool,
+    pub host: String,
+    pub checked_ports: Vec<u16>,
+    pub reachable_ports: Vec<u16>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SunshineVerificationResult {
+    pub reachable: bool,
+    pub authenticated: bool,
+    pub host: String,
+    pub port: u16,
+    pub error: Option<String>,
+}
+
+pub async fn initialize_post_wireguard_flow(
+    app: &AppHandle,
+    context: &AppContext,
+    instance_id: u64,
+    config_path: &Path,
+) -> AppResult<()> {
+    let previous_instance_id = {
+        context
+            .state
+            .read()
+            .await
+            .post_wireguard_setup
+            .current_instance_id
+    };
+    if !config_path.is_file() {
+        return Err(AppError::NotFound(format!(
+            "Generated WireGuard config not found at {}",
+            config_path.display()
+        )));
+    }
+    let mode = platform_wireguard_mode();
+
+    context
+        .update_state(|state| {
+            state.post_wireguard_setup = PostWireGuardSetupState {
+                stage: SetupStage::WireguardConfigGenerated,
+                wireguard_setup_mode: mode,
+                wireguard_setup_status: WireGuardSetupStatus::ConfigGenerated,
+                current_instance_id: Some(instance_id),
+                wireguard_export_path: String::new(),
+                wireguard_config: String::new(),
+                wireguard_verified_host: TUNNEL_HOST.to_string(),
+                wireguard_reachable_ports: Vec::new(),
+                sunshine_username: state.credentials.app_username.clone(),
+                moonlight_host: TUNNEL_HOST.to_string(),
+                paired: false,
+                setup_complete: false,
+                last_error: None,
+            };
+            state.orchestration_state = OrchestrationState::WireGuardConfigGenerated;
+            state.last_error = None;
+        })
+        .await?;
+
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::WireGuardConfigGenerated,
+        "WireGuard config generated",
+        Some(format!(
+            "Embedded GotaTun setup is ready to activate from the managed config at {}",
+            config_path.display()
+        )),
+        false,
+    )
+    .await;
+
+    if previous_instance_id != Some(instance_id) {
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::WireGuardConfigGenerated,
+            "New instance detected",
+            Some(
+                "This is a different instance. The managed secure tunnel must be re-applied and verified again before Sunshine/Moonlight setup."
+                    .to_string(),
+            ),
+            false,
+        )
+        .await;
+    }
+
+    Ok(())
+}
+
+pub async fn setup_wireguard_app_handoff(
+    app: &AppHandle,
+    context: &AppContext,
+) -> AppResult<PostWireGuardSetupState> {
+    let config_path = active_wireguard_config_path(context).await?;
+
+    context
+        .update_state(|state| {
+            state.post_wireguard_setup.stage = SetupStage::WireguardAppHandoffStarted;
+            state.post_wireguard_setup.wireguard_setup_status =
+                WireGuardSetupStatus::AppHandoffStarted;
+            state.orchestration_state = OrchestrationState::WireGuardAppHandoffStarted;
+            state.post_wireguard_setup.last_error = None;
+            state.last_error = None;
+        })
+        .await?;
+
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::WireGuardAppHandoffStarted,
+        "Starting managed secure tunnel",
+        Some(format!(
+            "Applying the generated config with Noland's GotaTun-backed userspace tunnel runner: {}",
+            config_path.display()
+        )),
+        false,
+    )
+    .await;
+
+    let activation_message = match setup_local_wireguard_client(&config_path) {
+        Ok(message) => message,
+        Err(error) => {
+            set_setup_failure(
+                context,
+                SetupStage::WireguardAppHandoffStarted,
+                OrchestrationState::WireGuardWaitingForActivation,
+                "managed_tunnel_start_failed",
+                "The managed GotaTun tunnel could not be started.",
+                Some(error.to_string()),
+                true,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+
+    context
+        .update_state(|state| {
+            state.post_wireguard_setup.stage = SetupStage::WireguardVerifying;
+            state.post_wireguard_setup.wireguard_setup_status = WireGuardSetupStatus::Verifying;
+            state.orchestration_state = OrchestrationState::WireGuardVerifying;
+        })
+        .await?;
+
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::WireGuardVerifying,
+        "Managed tunnel activated",
+        Some(activation_message),
+        false,
+    )
+    .await;
+
+    let (remote, _) = sunshine_ssh_remote(context).await?;
+    let mtu_selection = match tune_connected_tunnel(
+        config_path.clone(),
+        remote.clone(),
+        context.config.wireguard.server_interface_name.clone(),
+        remote.ssh_host.clone(),
+        TUNNEL_HOST.to_string(),
+        context.config.wireguard.tunnel_mtu,
+    )
+    .await
+    {
+        Ok(selection) => selection,
+        Err(error) => {
+            set_setup_failure(
+                context,
+                SetupStage::WireguardVerifying,
+                OrchestrationState::WireGuardWaitingForActivation,
+                "wireguard_mtu_tuning_failed",
+                "The secure tunnel connected, but its MTU could not be safely applied.",
+                Some(error.to_string()),
+                true,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+    info!(
+        tunnel_mtu = mtu_selection.mtu,
+        path_mtu = mtu_selection.path_mtu,
+        source = mtu_selection.source,
+        "selected and applied WireGuard MTU over the connected tunnel"
+    );
+    let selected_mtu = mtu_selection.mtu;
+    context
+        .update_state(|state| {
+            let instance_id = state
+                .post_wireguard_setup
+                .current_instance_id
+                .or(state.instance.instance_id);
+            if let Some(server) = instance_id.and_then(|instance_id| {
+                state
+                    .provisioned_servers
+                    .iter_mut()
+                    .find(|server| server.instance_id == instance_id)
+            }) {
+                server.network.direct.effective_mtu = Some(selected_mtu);
+                server.network.client_revision = server.network.client_revision.saturating_add(1);
+                server.network.updated_at = Some(chrono::Utc::now().to_rfc3339());
+            }
+        })
+        .await?;
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::WireGuardVerifying,
+        "Secure tunnel MTU selected",
+        Some(format!(
+            "Connected-path probing selected MTU {} (source: {}).",
+            mtu_selection.mtu, mtu_selection.source
+        )),
+        false,
+    )
+    .await;
+
+    let verification = verify_wireguard_connection(app, context).await?;
+    if !verification.reachable {
+        return Err(AppError::Command(verification.error.unwrap_or_else(|| {
+            "Managed GotaTun tunnel verification failed".to_string()
+        })));
+    }
+    Ok(context.state.read().await.post_wireguard_setup.clone())
+}
+
+pub async fn verify_wireguard_connection(
+    app: &AppHandle,
+    context: &AppContext,
+) -> AppResult<ReachabilityResult> {
+    context
+        .update_state(|state| {
+            state.post_wireguard_setup.stage = SetupStage::WireguardVerifying;
+            state.post_wireguard_setup.wireguard_setup_status = WireGuardSetupStatus::Verifying;
+            state.orchestration_state = OrchestrationState::WireGuardVerifying;
+            state.post_wireguard_setup.last_error = None;
+            state.last_error = None;
+        })
+        .await?;
+
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::WireGuardVerifying,
+        "Verifying secure tunnel reachability",
+        Some(format!(
+            "Checking {} on ports {:?}",
+            TUNNEL_HOST, REACHABILITY_PORTS
+        )),
+        false,
+    )
+    .await;
+
+    let config_path = active_wireguard_config_path(context).await?;
+    let tunnel_verification = verify_managed_gotatun_tunnel(&config_path);
+    let application_reachability =
+        tcp_reachability(TUNNEL_HOST, &REACHABILITY_PORTS, Duration::from_secs(2));
+    let result = match tunnel_verification {
+        Ok(_) if application_reachability.reachable => ReachabilityResult {
+            reachable: true,
+            host: TUNNEL_HOST.to_string(),
+            checked_ports: REACHABILITY_PORTS.to_vec(),
+            reachable_ports: application_reachability.reachable_ports,
+            error: None,
+        },
+        Ok(detail) => ReachabilityResult {
+            reachable: false,
+            host: TUNNEL_HOST.to_string(),
+            checked_ports: REACHABILITY_PORTS.to_vec(),
+            reachable_ports: Vec::new(),
+            error: Some(format!(
+                "{detail}. WireGuard handshaked, but no Sunshine TCP port was reachable over the tunnel: {}",
+                application_reachability
+                    .error
+                    .unwrap_or_else(|| "10.77.0.1 did not accept TCP on the expected ports".to_string())
+            )),
+        },
+        Err(error) => ReachabilityResult {
+            reachable: false,
+            host: TUNNEL_HOST.to_string(),
+            checked_ports: REACHABILITY_PORTS.to_vec(),
+            reachable_ports: Vec::new(),
+            error: Some(error.to_string()),
+        },
+    };
+    if result.reachable {
+        let verified_at = chrono::Utc::now().to_rfc3339();
+        context
+            .update_state(|state| {
+                state.post_wireguard_setup.stage = SetupStage::WireguardConnected;
+                state.post_wireguard_setup.wireguard_setup_status = WireGuardSetupStatus::Connected;
+                state.post_wireguard_setup.wireguard_reachable_ports =
+                    result.reachable_ports.clone();
+                state.orchestration_state = OrchestrationState::MoonlightSunshineReadyToSetup;
+                state.last_error = None;
+                if let Some(instance_id) = state.post_wireguard_setup.current_instance_id {
+                    if let Some(server) = state
+                        .provisioned_servers
+                        .iter_mut()
+                        .find(|server| server.instance_id == instance_id)
+                    {
+                        server.network.client_revision =
+                            server.network.client_revision.saturating_add(1);
+                        server.network.updated_at = Some(verified_at.clone());
+                        server.network.direct.availability =
+                            noland_network_contracts::state::PathAvailability::Ready;
+                        if server.network.active_transport.is_none() {
+                            server.network.active_transport =
+                                Some(noland_network_contracts::state::TransportKind::Direct);
+                        }
+                    }
+                }
+            })
+            .await?;
+
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::WireGuardConnected,
+            "Connection verified",
+            Some(if result.reachable_ports.is_empty() {
+                format!(
+                    "Embedded GotaTun is healthy for {}. Sunshine ports are still starting and will be verified next.",
+                    TUNNEL_HOST
+                )
+            } else {
+                format!(
+                    "Embedded GotaTun is healthy; reachable Sunshine ports on {}: {:?}",
+                    TUNNEL_HOST, result.reachable_ports
+                )
+            }),
+            false,
+        )
+        .await;
+
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::MoonlightSunshineReadyToSetup,
+            "Secure tunnel connected",
+            Some("Next, set up game streaming.".to_string()),
+            false,
+        )
+        .await;
+    } else {
+        set_setup_failure(
+            context,
+            SetupStage::WireguardWaitingForActivation,
+            OrchestrationState::WireGuardWaitingForActivation,
+            "wireguard_unreachable",
+            "We could not reach Sunshine over 10.77.0.1 yet. The WireGuard handshake alone is not enough; retry activation after the local tunnel can pass TCP traffic.",
+            result.error.clone(),
+            true,
+        )
+        .await?;
+
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::WireGuardWaitingForActivation,
+            "WireGuard verification failed",
+            result.error.clone(),
+            true,
+        )
+        .await;
+    }
+
+    Ok(result)
+}
+
+pub async fn verify_sunshine_api(
+    app: &AppHandle,
+    context: &AppContext,
+) -> AppResult<SunshineVerificationResult> {
+    context
+        .update_state(|state| {
+            state.post_wireguard_setup.stage = SetupStage::SunshineVerifying;
+            state.orchestration_state = OrchestrationState::SunshineVerifying;
+            state.post_wireguard_setup.last_error = None;
+        })
+        .await?;
+
+    let moonlight_host = {
+        context
+            .state
+            .read()
+            .await
+            .post_wireguard_setup
+            .moonlight_host
+            .clone()
+    };
+
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::SunshineVerifying,
+        "Verifying Sunshine over the secure tunnel",
+        Some(format!(
+            "Checking https://{}:{}/api/config",
+            moonlight_host, SUNSHINE_API_PORT
+        )),
+        false,
+    )
+    .await;
+
+    let (username, password) = {
+        let state = context.state.read().await;
+        (
+            state.credentials.app_username.clone(),
+            state.credentials.app_password.clone(),
+        )
+    };
+
+    if username.trim().is_empty() || password.trim().is_empty() {
+        set_setup_failure(
+            context,
+            SetupStage::SunshineCredentialsConfiguring,
+            OrchestrationState::SunshineCredentialsConfiguring,
+            "missing_platform_credentials",
+            "Sunshine setup requires app username and password from state.json.",
+            Some("Set platform credentials in onboarding/settings, then retry.".to_string()),
+            true,
+        )
+        .await?;
+        return Err(AppError::InvalidInput(
+            "Sunshine setup requires app username/password from state.json.".to_string(),
+        ));
+    }
+
+    let client = sunshine_http_client()?;
+    let config_path = active_wireguard_config_path(context).await?;
+    let mut tunnel_reconnected = false;
+    let mut response =
+        sunshine_config_response(&client, &moonlight_host, &username, &password).await;
+    for attempt in 1..=SUNSHINE_VERIFY_HTTP_ATTEMPTS {
+        if let Err(error) = &response {
+            info!(attempt, %error, "Sunshine API request failed; checking managed tunnel");
+            if !tunnel_reconnected {
+                match verify_managed_gotatun_tunnel(&config_path) {
+                    Ok(detail) => {
+                        info!(%detail, "Managed tunnel healthy while Sunshine request failed")
+                    }
+                    Err(tunnel_error) => {
+                        warn!(%tunnel_error, "Managed tunnel unhealthy during Sunshine verification; reconnecting");
+                        tunnel_reconnected = true;
+                        match reconnect_local_wireguard_client(&config_path) {
+                            Ok(detail) => {
+                                info!(%detail, "Managed tunnel reconnected during Sunshine verification")
+                            }
+                            Err(reconnect_error) => {
+                                warn!(%reconnect_error, "Managed tunnel reconnect failed during Sunshine verification")
+                            }
+                        }
+                    }
+                }
+            }
+            if attempt < SUNSHINE_VERIFY_HTTP_ATTEMPTS {
+                sleep(SUNSHINE_VERIFY_HTTP_POLL_INTERVAL).await;
+                response =
+                    sunshine_config_response(&client, &moonlight_host, &username, &password).await;
+            }
+        } else {
+            break;
+        }
+    }
+
+    let result = match response {
+        Ok(response) if response.status.is_success() => SunshineVerificationResult {
+            reachable: true,
+            authenticated: true,
+            host: moonlight_host.clone(),
+            port: SUNSHINE_API_PORT,
+            error: None,
+        },
+        Ok(response) if response.welcome_redirect() => SunshineVerificationResult {
+            reachable: true,
+            authenticated: false,
+            host: moonlight_host.clone(),
+            port: SUNSHINE_API_PORT,
+            error: Some(
+                "Sunshine is still in its first-run welcome flow. Finish Sunshine setup on the host before pairing."
+                    .to_string(),
+            ),
+        },
+        Ok(response) if response.status == reqwest::StatusCode::UNAUTHORIZED => {
+            SunshineVerificationResult {
+                reachable: true,
+                authenticated: false,
+                host: moonlight_host.clone(),
+                port: SUNSHINE_API_PORT,
+                error: Some(
+                    "Sunshine is reachable, but the stored credentials were rejected. Create or update your Sunshine login, then retry.".to_string(),
+                ),
+            }
+        }
+        Ok(response) => SunshineVerificationResult {
+            reachable: false,
+            authenticated: false,
+            host: moonlight_host.clone(),
+            port: SUNSHINE_API_PORT,
+            error: Some(format!(
+                "Sunshine API returned status {}{}",
+                response.status,
+                response
+                    .location
+                    .as_deref()
+                    .map(|location| format!(" (location: {location})"))
+                    .unwrap_or_default()
+            )),
+        },
+        Err(error) => SunshineVerificationResult {
+            reachable: false,
+            authenticated: false,
+            host: moonlight_host.clone(),
+            port: SUNSHINE_API_PORT,
+            error: Some(error.to_string()),
+        },
+    };
+
+    if !result.reachable || !result.authenticated {
+        let message = result
+            .error
+            .clone()
+            .unwrap_or_else(|| "Sunshine verification failed".to_string());
+        let details = format!(
+            "{} {}",
+            message,
+            sunshine_manual_login_instructions(&moonlight_host, &username, &password)
+        );
+        set_setup_failure(
+            context,
+            SetupStage::SunshineVerifying,
+            OrchestrationState::SunshineVerifying,
+            "sunshine_verify_failed",
+            &message,
+            Some(details),
+            true,
+        )
+        .await?;
+    }
+
+    Ok(result)
+}
+
+pub async fn setup_moonlight_sunshine(
+    app: &AppHandle,
+    context: &AppContext,
+) -> AppResult<PostWireGuardSetupState> {
+    let (active_instance_id, setup_instance_id) = {
+        let state = context.state.read().await;
+        (
+            state.instance.instance_id,
+            state.post_wireguard_setup.current_instance_id,
+        )
+    };
+
+    if setup_instance_id.is_none() || active_instance_id != setup_instance_id {
+        let error = "WireGuard setup context is for a different instance. Re-apply the managed tunnel for this new provisioned instance.".to_string();
+        set_setup_failure(
+            context,
+            SetupStage::WireguardConfigGenerated,
+            OrchestrationState::WireGuardConfigGenerated,
+            "wireguard_setup_required_for_new_instance",
+            &error,
+            Some(
+                "The active instance changed, so previous WireGuard setup state cannot be reused."
+                    .to_string(),
+            ),
+            true,
+        )
+        .await?;
+        return Err(AppError::Provisioning(error));
+    }
+
+    let config_path = active_wireguard_config_path(context).await?;
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::WireGuardVerifying,
+        "Checking managed tunnel before Sunshine setup",
+        Some(format!(
+            "Verifying local GotaTun helper for {} before contacting Sunshine.",
+            config_path.display()
+        )),
+        false,
+    )
+    .await;
+
+    let tunnel_status = match verify_managed_gotatun_tunnel(&config_path) {
+        Ok(status) => Ok(status),
+        Err(error) => {
+            warn!(%error, "Managed tunnel was not healthy before Sunshine setup; reconnecting");
+            reconnect_local_wireguard_client(&config_path).and_then(|message| {
+                verify_managed_gotatun_tunnel(&config_path)
+                    .map(|status| format!("{message} {status}"))
+            })
+        }
+    };
+
+    let tunnel_status = match tunnel_status {
+        Ok(status) => status,
+        Err(error) => {
+            set_setup_failure(
+                context,
+                SetupStage::WireguardWaitingForActivation,
+                OrchestrationState::WireGuardWaitingForActivation,
+                "managed_tunnel_not_running",
+                "The managed GotaTun tunnel is not running locally.",
+                Some(format!(
+                    "Noland could not verify or restart the local GotaTun helper before Sunshine setup: {error}"
+                )),
+                true,
+            )
+            .await?;
+            return Err(error);
+        }
+    };
+
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::WireGuardConnected,
+        "Managed tunnel ready for Sunshine",
+        Some(tunnel_status),
+        false,
+    )
+    .await;
+
+    context
+        .update_state(|state| {
+            state.post_wireguard_setup.stage = SetupStage::SunshineCredentialsConfiguring;
+            state.orchestration_state = OrchestrationState::SunshineCredentialsConfiguring;
+            state.post_wireguard_setup.wireguard_setup_status = WireGuardSetupStatus::Connected;
+            state.post_wireguard_setup.sunshine_username = state.credentials.app_username.clone();
+            state.post_wireguard_setup.last_error = None;
+        })
+        .await?;
+
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::SunshineCredentialsConfiguring,
+        "Configuring Sunshine credentials",
+        Some("Using the current platform username as the preferred Sunshine login.".to_string()),
+        false,
+    )
+    .await;
+
+    let (username, password, moonlight_host) = {
+        let state = context.state.read().await;
+        (
+            state.credentials.app_username.clone(),
+            state.credentials.app_password.clone(),
+            state.post_wireguard_setup.moonlight_host.clone(),
+        )
+    };
+
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::SunshineCredentialsConfiguring,
+        "Preparing Sunshine before pairing",
+        Some(
+            "Reapplying credentials and restarting Sunshine before asking for a Moonlight PIN."
+                .to_string(),
+        ),
+        false,
+    )
+    .await;
+
+    let sunshine = match timeout(SUNSHINE_PRE_PIN_VERIFY_TIMEOUT, async {
+        repair_sunshine_auth_state(app, context, &username, &password, false).await?;
+
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::SunshineVerifying,
+            "Checking Sunshine TLS certificate",
+            Some(
+                "Generating or rotating certificate only if missing or expiring soon (30 days)."
+                    .to_string(),
+            ),
+            false,
+        )
+        .await;
+
+        let tls_action = ensure_sunshine_tls_certificate_over_ssh(context).await?;
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::SunshineVerifying,
+            "Sunshine TLS certificate status",
+            Some(tls_action.clone()),
+            false,
+        )
+        .await;
+
+        let tls_cert_changed = !tls_action.contains("TLS_ACTION=skipped");
+        let tls_config_changed = tls_action.contains("TLS_CONFIG_CHANGED=1");
+        if tls_cert_changed || tls_config_changed {
+            emit_post_wireguard_event(
+                app,
+                context,
+                OrchestrationState::SunshineVerifying,
+                "Restarting Sunshine after TLS update",
+                Some(if tls_cert_changed {
+                    "Applying new/rotated TLS certificate before pairing.".to_string()
+                } else {
+                    "Applying Sunshine TLS config changes before pairing.".to_string()
+                }),
+                false,
+            )
+            .await;
+            restart_sunshine_service_over_ssh(context).await?;
+        }
+
+        verify_sunshine_api(app, context).await
+    })
+    .await
+    {
+        Ok(result) => result?,
+        Err(_) => {
+            let error = format!(
+                "Sunshine verification took longer than {} seconds. Reconnect Noland's managed tunnel and try again.",
+                SUNSHINE_PRE_PIN_VERIFY_TIMEOUT.as_secs()
+            );
+            let timeout_details = format!(
+                "The secure tunnel or Sunshine API did not become ready in time before Moonlight PIN setup. {}",
+                sunshine_manual_login_instructions(&moonlight_host, &username, &password)
+            );
+            reset_to_wireguard_recovery_step(
+                context,
+                "sunshine_verify_timeout",
+                &error,
+                Some(timeout_details),
+            )
+            .await?;
+            emit_post_wireguard_event(
+                app,
+                context,
+                recovery_orchestration_state(context).await,
+                "Sunshine verification timed out",
+                Some(error.clone()),
+                true,
+            )
+            .await;
+            return Err(AppError::Provisioning(error));
+        }
+    };
+
+    if !sunshine.reachable || !sunshine.authenticated {
+        return Err(AppError::Provisioning(
+            sunshine
+                .error
+                .unwrap_or_else(|| "Sunshine verification failed".to_string()),
+        ));
+    }
+
+    let moonlight_host_for_state = moonlight_host.clone();
+
+    {
+        let state = context
+            .update_state(move |state| {
+                state.post_wireguard_setup.stage = SetupStage::MoonlightPairingStarted;
+                state.orchestration_state = OrchestrationState::MoonlightPairingStarted;
+                state.moonlight.host_address = moonlight_host_for_state.clone();
+                state.moonlight.configured = true;
+                state.post_wireguard_setup.moonlight_host = moonlight_host_for_state.clone();
+
+                if let Some(instance_id) = state
+                    .post_wireguard_setup
+                    .current_instance_id
+                    .or(state.instance.instance_id)
+                {
+                    if let Some(server) = state
+                        .provisioned_servers
+                        .iter_mut()
+                        .find(|server| server.instance_id == instance_id)
+                    {
+                        server.embedded_moonlight_pipeline_enabled = true;
+                        if server.embedded_moonlight_host_id.trim().is_empty() {
+                            server.embedded_moonlight_host_id = format!("instance-{}", instance_id);
+                        }
+                    }
+                }
+            })
+            .await?;
+
+        emit_post_wireguard_event(
+            app,
+            context,
+            OrchestrationState::MoonlightPairingStarted,
+            "Embedded Moonlight pairing ready",
+            Some(
+                "Built-in Moonlight is enabled for this instance, so Noland will generate the Sunshine pairing PIN itself. Use Generate Pairing PIN below."
+                    .to_string(),
+            ),
+            false,
+        )
+        .await;
+
+        // Launch Steam in the background while the user pairs so first-run setup can complete.
+        let ctx_clone = context.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Ok((remote, sunshine_user)) = sunshine_ssh_remote(&ctx_clone).await {
+                let command = format!(
+                    "sudo -u {} env DISPLAY=:0 steam >/dev/null 2>&1 & disown",
+                    sunshine_user
+                );
+                let _ = tokio::task::spawn_blocking(move || {
+                    remote.ssh(&command, std::time::Duration::from_secs(120))
+                })
+                .await;
+            }
+        });
+
+        return Ok(state.post_wireguard_setup);
+    }
+}
+
+pub async fn get_setup_status(context: &AppContext) -> PostWireGuardSetupState {
+    context.state.read().await.post_wireguard_setup.clone()
+}
+
+pub async fn retry_setup_stage(
+    app: &AppHandle,
+    context: &AppContext,
+    stage: SetupStage,
+) -> AppResult<PostWireGuardSetupState> {
+    match stage {
+        SetupStage::WireguardConfigGenerated
+        | SetupStage::WireguardAppHandoffStarted
+        | SetupStage::WireguardWaitingForImport
+        | SetupStage::WireguardWaitingForActivation
+        | SetupStage::WireguardVerifying
+        | SetupStage::WireguardConnected => {
+            let _ = setup_wireguard_app_handoff(app, context).await?;
+        }
+        SetupStage::MoonlightSunshineReadyToSetup
+        | SetupStage::SunshineCredentialsConfiguring
+        | SetupStage::SunshineVerifying
+        | SetupStage::MoonlightDetecting
+        | SetupStage::MoonlightPairingStarted
+        | SetupStage::MoonlightPinReceived
+        | SetupStage::SunshinePinSubmitting
+        | SetupStage::MoonlightSunshinePaired
+        | SetupStage::SetupComplete
+        | SetupStage::Failed => {
+            let _ = setup_moonlight_sunshine(app, context).await?;
+        }
+        SetupStage::PreWireguardExistingFlow => {}
+    }
+
+    Ok(context.state.read().await.post_wireguard_setup.clone())
+}
+
+fn platform_wireguard_mode() -> WireGuardSetupMode {
+    WireGuardSetupMode::EmbeddedGotatun
+}
+
+async fn active_wireguard_config_path(context: &AppContext) -> AppResult<PathBuf> {
+    let state = context.state.read().await;
+    let active_instance_id = state
+        .instance
+        .instance_id
+        .or(state.post_wireguard_setup.current_instance_id)
+        .ok_or_else(|| {
+            AppError::State(
+                "Missing active instance id for WireGuard config selection. Re-run provisioning."
+                    .to_string(),
+            )
+        })?;
+
+    let candidate = if let Some(path) = state
+        .provisioned_servers
+        .iter()
+        .find(|record| record.instance_id == active_instance_id)
+        .map(|record| PathBuf::from(record.wireguard_config_path.clone()))
+        .filter(|path| path.exists())
+    {
+        path
+    } else {
+        return Err(AppError::NotFound(format!(
+            "WireGuard config for active instance {} was not found. Regenerate WireGuard for this instance.",
+            active_instance_id
+        )));
+    };
+
+    if candidate.as_os_str().is_empty() || !candidate.exists() {
+        return Err(AppError::NotFound(
+            "Generated WireGuard config not found. Re-run provisioning from the WireGuard stage."
+                .to_string(),
+        ));
+    }
+
+    let instance_segment = format!("/{}/", active_instance_id);
+    let normalized_candidate = candidate.to_string_lossy().replace('\\', "/");
+    if !normalized_candidate.contains(&instance_segment) {
+        return Err(AppError::Provisioning(format!(
+            "WireGuard config {} does not belong to active instance {}. Regenerate WireGuard for this instance.",
+            candidate.display(),
+            active_instance_id
+        )));
+    }
+
+    Ok(candidate)
+}
+
+fn tcp_reachability(host: &str, ports: &[u16], timeout: Duration) -> ReachabilityResult {
+    let mut reachable_ports = Vec::new();
+    let mut last_error = None;
+
+    for port in ports {
+        let Some(address) = resolve_socket_addr(host, *port) else {
+            last_error = Some(format!("Could not resolve {host}:{port}"));
+            continue;
+        };
+
+        match TcpStream::connect_timeout(&address, timeout) {
+            Ok(stream) => {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                reachable_ports.push(*port);
+            }
+            Err(error) => {
+                last_error = Some(format!("{host}:{port} is unreachable: {error}"));
+            }
+        }
+    }
+
+    ReachabilityResult {
+        reachable: !reachable_ports.is_empty(),
+        host: host.to_string(),
+        checked_ports: ports.to_vec(),
+        reachable_ports,
+        error: last_error,
+    }
+}
+
+fn resolve_socket_addr(host: &str, port: u16) -> Option<SocketAddr> {
+    (host, port).to_socket_addrs().ok()?.next()
+}
+
+async fn sunshine_config_response(
+    client: &reqwest::Client,
+    host: &str,
+    username: &str,
+    password: &str,
+) -> Result<SunshineApiResponse, reqwest::Error> {
+    let response = client
+        .get(sunshine_api_url(host, "/api/config"))
+        .basic_auth(username, Some(password))
+        .send()
+        .await?;
+    Ok(SunshineApiResponse {
+        status: response.status(),
+        location: response
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.to_string()),
+        body: None,
+        json_status: None,
+        json_error: None,
+    })
+}
+
+fn sunshine_pairing_id(unique_id: &str) -> String {
+    let normalized = unique_id.trim().to_ascii_lowercase();
+    if normalized.len() == 32 && normalized.chars().all(|value| value.is_ascii_hexdigit()) {
+        return normalized;
+    }
+
+    // Older persisted Moonlight identities use a 16-character unique ID. Sunshine's
+    // current /api/pin endpoint requires a 32-character hexadecimal pairing ID;
+    // expanding the stable legacy ID keeps re-pairing requests associated with the
+    // same client without changing the GameStream identity format.
+    format!("{normalized}{normalized}")
+}
+
+async fn submit_sunshine_pin_request(
+    client: &reqwest::Client,
+    host: &str,
+    username: &str,
+    password: &str,
+    pin: &str,
+    pairing_id: &str,
+    client_name: &str,
+) -> Result<SunshineApiResponse, reqwest::Error> {
+    let response = client
+        .post(sunshine_api_url(host, "/api/pin"))
+        .basic_auth(username, Some(password))
+        .json(&serde_json::json!({
+            "pin": pin,
+            "pairing_id": sunshine_pairing_id(pairing_id),
+            "name": client_name,
+        }))
+        .send()
+        .await?;
+
+    let status = response.status();
+    let location = response
+        .headers()
+        .get(reqwest::header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .map(ToOwned::to_owned);
+    let body = response.text().await.ok();
+    let (json_status, json_error) = parse_sunshine_pin_response_body(body.as_deref());
+
+    Ok(SunshineApiResponse {
+        status,
+        location,
+        json_status,
+        json_error,
+        body,
+    })
+}
+
+pub async fn authorize_sunshine_pin(
+    host: &str,
+    username: &str,
+    password: &str,
+    pin: &str,
+    pairing_id: &str,
+    client_name: Option<&str>,
+) -> AppResult<()> {
+    let client = sunshine_http_client()?;
+    let effective_client_name = client_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| env::var("COMPUTERNAME").ok())
+        .or_else(|| env::var("HOSTNAME").ok())
+        .unwrap_or_else(|| "machine".to_string());
+
+    let mut last_pending_session_error = None;
+
+    for attempt in 1..=SUNSHINE_PIN_SUBMISSION_ATTEMPTS {
+        let response = submit_sunshine_pin_request(
+            &client,
+            host,
+            username,
+            password,
+            pin,
+            pairing_id,
+            &effective_client_name,
+        )
+        .await
+        .map_err(|error| AppError::Api(format!("Failed submitting Sunshine PIN: {error}")))?;
+
+        if response.welcome_redirect() {
+            return Err(AppError::Provisioning(
+                "Sunshine is still in its first-run welcome flow after repair. Finish Sunshine setup on the host before submitting a Moonlight PIN.".to_string(),
+            ));
+        }
+
+        if !response.status.is_success() {
+            return Err(AppError::Provisioning(format!(
+                "Sunshine rejected the PIN request with status {}{}{}",
+                response.status,
+                response
+                    .location
+                    .as_deref()
+                    .map(|location| format!(" (location: {location})"))
+                    .unwrap_or_default(),
+                response
+                    .body
+                    .as_deref()
+                    .map(|body| format!(" (body: {body})"))
+                    .unwrap_or_default()
+            )));
+        }
+
+        if response.json_status == Some(false) {
+            let message = response
+                .json_error
+                .clone()
+                .or_else(|| response.body.clone())
+                .unwrap_or_else(|| {
+                    "Sunshine reported that the PIN approval was rejected because no pending Moonlight pairing session was waiting for it.".to_string()
+                });
+
+            last_pending_session_error = Some(message.clone());
+            if attempt < SUNSHINE_PIN_SUBMISSION_ATTEMPTS {
+                warn!(
+                    host,
+                    attempt,
+                    total_attempts = SUNSHINE_PIN_SUBMISSION_ATTEMPTS,
+                    "Sunshine /api/pin reported no pending Moonlight pairing session yet; retrying shortly"
+                );
+                sleep(SUNSHINE_PIN_RETRY_DELAY).await;
+                continue;
+            }
+
+            return Err(AppError::Provisioning(message));
+        }
+
+        if response.json_status.is_none() && response.body.is_some() {
+            warn!(
+                host,
+                "Sunshine /api/pin returned success without a parseable JSON status body"
+            );
+        }
+
+        return Ok(());
+    }
+
+    Err(AppError::Provisioning(
+        last_pending_session_error.unwrap_or_else(|| {
+            "Sunshine reported no pending Moonlight pairing session for the submitted PIN."
+                .to_string()
+        }),
+    ))
+}
+
+async fn repair_sunshine_auth_state(
+    app: &AppHandle,
+    context: &AppContext,
+    sunshine_username: &str,
+    sunshine_password: &str,
+    best_effort: bool,
+) -> AppResult<()> {
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::SunshineVerifying,
+        "Repairing Sunshine auth state",
+        Some("Reapplying Sunshine credentials before restarting the service.".to_string()),
+        false,
+    )
+    .await;
+
+    bootstrap_sunshine_credentials_over_ssh(context, sunshine_username, sunshine_password).await?;
+
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::SunshineVerifying,
+        "Restarting Sunshine service",
+        Some("Refreshing Sunshine so the updated credentials take effect.".to_string()),
+        false,
+    )
+    .await;
+
+    restart_sunshine_service_over_ssh(context).await?;
+
+    emit_post_wireguard_event(
+        app,
+        context,
+        OrchestrationState::SunshineVerifying,
+        "Verifying Sunshine API readiness",
+        Some("Waiting for Sunshine to stop redirecting to the welcome page.".to_string()),
+        false,
+    )
+    .await;
+
+    let moonlight_host = {
+        context
+            .state
+            .read()
+            .await
+            .post_wireguard_setup
+            .moonlight_host
+            .clone()
+    };
+    let client = sunshine_http_client()?;
+    let config_path = active_wireguard_config_path(context).await?;
+    let mut tunnel_reconnected = false;
+    for attempt in 1..=SUNSHINE_API_READY_RETRIES {
+        match sunshine_config_response(
+            &client,
+            &moonlight_host,
+            sunshine_username,
+            sunshine_password,
+        )
+        .await
+        {
+            Ok(response) if response.status.is_success() => {
+                info!(attempt, "Sunshine API became ready after restart");
+                return Ok(());
+            }
+            Ok(response) => {
+                info!(
+                    attempt,
+                    status = %response.status,
+                    location = response.location.as_deref().unwrap_or(""),
+                    "Sunshine API not ready yet after restart"
+                );
+                if !best_effort
+                    && !response.welcome_redirect()
+                    && response.status != reqwest::StatusCode::UNAUTHORIZED
+                {
+                    return Err(AppError::Provisioning(format!(
+                        "Sunshine API returned status {}{} while waiting for auth readiness.",
+                        response.status,
+                        response
+                            .location
+                            .as_deref()
+                            .map(|location| format!(" (location: {location})"))
+                            .unwrap_or_default()
+                    )));
+                }
+            }
+            Err(error) => {
+                info!(attempt, %error, "Sunshine API not reachable yet after restart");
+                // The API request rides over the managed tunnel. A connection-level
+                // failure usually means the tunnel itself lapsed (handshake expiry or
+                // a NAT rebinding window), not that Sunshine is down. Verify the tunnel
+                // and reconnect it before spending the rest of the retry budget on a
+                // dead path.
+                if !best_effort && !tunnel_reconnected {
+                    match verify_managed_gotatun_tunnel(&config_path) {
+                        Ok(detail) => {
+                            info!(%detail, "Managed tunnel healthy while Sunshine is warming up");
+                        }
+                        Err(tunnel_error) => {
+                            warn!(
+                                %tunnel_error,
+                                "Managed tunnel unhealthy during Sunshine readiness; reconnecting"
+                            );
+                            tunnel_reconnected = true;
+                            match reconnect_local_wireguard_client(&config_path) {
+                                Ok(detail) => {
+                                    info!(
+                                        %detail,
+                                        "Managed tunnel reconnected during Sunshine readiness"
+                                    );
+                                }
+                                Err(reconnect_error) => {
+                                    warn!(
+                                        %reconnect_error,
+                                        "Managed tunnel reconnect failed; continuing Sunshine retries"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                if !best_effort && attempt == SUNSHINE_API_READY_RETRIES {
+                    return Err(AppError::Provisioning(format!(
+                        "Sunshine did not become ready after restart: {error}"
+                    )));
+                }
+            }
+        }
+
+        sleep(SUNSHINE_API_READY_POLL_INTERVAL).await;
+    }
+
+    Err(AppError::Provisioning(
+        "Sunshine stayed in its welcome/auth flow after credentials were reapplied and the service restarted."
+            .to_string(),
+    ))
+}
+
+async fn sunshine_ssh_remote(context: &AppContext) -> AppResult<(RemoteExec, String)> {
+    let (
+        private_key_path,
+        key_passphrase,
+        ssh_host,
+        ssh_port,
+        ssh_user,
+        ssh_password,
+        sunshine_user,
+    ) = {
+        let state = context.state.read().await;
+        let ssh_user = if state.ssh.ssh_username.trim().is_empty() {
+            context.config.ssh_user.clone()
+        } else {
+            state.ssh.ssh_username.clone()
+        };
+        (
+            state.ssh.private_key_path.clone(),
+            state.credentials.app_password.clone(),
+            state.instance.ssh_host.clone(),
+            state.instance.ssh_port,
+            ssh_user,
+            state.ssh.ssh_password.clone(),
+            context.config.audio_target_user.clone(),
+        )
+    };
+
+    if private_key_path.trim().is_empty() || ssh_host.trim().is_empty() || ssh_port == 0 {
+        return Err(AppError::State(
+            "Cannot manage Sunshine over SSH because SSH connection details are missing."
+                .to_string(),
+        ));
+    }
+
+    SshKeyService::new("nolandConnectSSH")
+        .load_key_into_agent(Path::new(&private_key_path), &key_passphrase)
+        .await?;
+
+    Ok((
+        RemoteExec {
+            ssh_user: sanitize_ssh_user(&ssh_user),
+            ssh_host,
+            ssh_port,
+            private_key_path,
+            ssh_password,
+        },
+        sanitize_ssh_user(&sunshine_user),
+    ))
+}
+
+async fn restart_sunshine_service_over_ssh(context: &AppContext) -> AppResult<()> {
+    let (remote, _) = sunshine_ssh_remote(context).await?;
+    let output = tokio::task::spawn_blocking(move || {
+        remote.ssh(
+            "systemctl restart sunshine && sleep 2 && systemctl is-active sunshine",
+            Duration::from_secs(30),
+        )
+    })
+    .await
+    .map_err(|error| {
+        AppError::Command(format!("Failed to join Sunshine restart task: {error}"))
+    })??;
+
+    if output.status_code != 0 || output.stdout.trim() != "active" {
+        return Err(AppError::Provisioning(format!(
+            "Failed restarting Sunshine service: stdout: {} | stderr: {}",
+            output.stdout.trim(),
+            output.stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
+async fn ensure_sunshine_tls_certificate_over_ssh(context: &AppContext) -> AppResult<String> {
+    let (remote, sunshine_user) = sunshine_ssh_remote(context).await?;
+    let command = format!(
+        "sudo bash -lc 'set -euo pipefail; TARGET_USER=\"{sunshine_user}\"; TARGET_GROUP=$(id -gn \"$TARGET_USER\"); TARGET_HOME=$(getent passwd \"$TARGET_USER\" | cut -d: -f6); CERT_DIR=\"/etc/sunshine/certs\"; CERT_PATH=\"$CERT_DIR/sunshine.crt\"; KEY_PATH=\"$CERT_DIR/sunshine.key\"; CNF_PATH=\"$CERT_DIR/sunshine-san.cnf\"; THRESHOLD_SECS=$(( {threshold_days} * 86400 )); mkdir -p \"$CERT_DIR\"; chown root:\"$TARGET_GROUP\" \"$CERT_DIR\"; chmod 750 \"$CERT_DIR\"; ACTION=skipped; NEEDS_GEN=0; CONFIG_CHANGED=0; if [ ! -s \"$CERT_PATH\" ] || [ ! -s \"$KEY_PATH\" ]; then NEEDS_GEN=1; ACTION=generated_missing; else END_DATE=$(openssl x509 -in \"$CERT_PATH\" -noout -enddate 2>/dev/null | cut -d= -f2 || true); if [ -z \"$END_DATE\" ]; then NEEDS_GEN=1; ACTION=generated_invalid; else END_EPOCH=$(date -d \"$END_DATE\" +%s 2>/dev/null || echo 0); NOW_EPOCH=$(date +%s); if [ \"$END_EPOCH\" -le 0 ] || [ $((END_EPOCH - NOW_EPOCH)) -lt $THRESHOLD_SECS ]; then NEEDS_GEN=1; ACTION=rotated_expiring; fi; fi; fi; if [ \"$NEEDS_GEN\" = \"1\" ]; then HOSTNAME_SHORT=$(hostname -s 2>/dev/null || echo sunshine-host); cat > \"$CNF_PATH\" <<EOF\n[req]\ndefault_bits       = 4096\nprompt             = no\ndefault_md         = sha256\ndistinguished_name = dn\nx509_extensions    = v3_req\n\n[dn]\nCN = $HOSTNAME_SHORT\n\n[v3_req]\nsubjectAltName = @alt_names\nkeyUsage = critical, digitalSignature, keyEncipherment\nextendedKeyUsage = serverAuth\nbasicConstraints = critical, CA:false\n\n[alt_names]\nDNS.1 = localhost\nDNS.2 = $HOSTNAME_SHORT\nIP.1 = 127.0.0.1\nIP.2 = 10.77.0.1\nEOF\nopenssl req -x509 -nodes -days 825 -newkey rsa:4096 -keyout \"$KEY_PATH\" -out \"$CERT_PATH\" -config \"$CNF_PATH\" >/dev/null 2>&1; fi; chmod 644 \"$CERT_PATH\" \"$CNF_PATH\"; chmod 640 \"$KEY_PATH\"; chown root:\"$TARGET_GROUP\" \"$CERT_PATH\" \"$KEY_PATH\" \"$CNF_PATH\"; SUN_CONF=\"$TARGET_HOME/.config/sunshine/sunshine.conf\"; sudo -u \"$TARGET_USER\" mkdir -p \"$TARGET_HOME/.config/sunshine\"; sudo -u \"$TARGET_USER\" touch \"$SUN_CONF\"; if grep -q \"^bind_address[[:space:]]*=\" \"$SUN_CONF\"; then sed -i \"/^bind_address[[:space:]]*=/d\" \"$SUN_CONF\"; CONFIG_CHANGED=1; fi; if grep -q \"^cert[[:space:]]*=\" \"$SUN_CONF\"; then if ! grep -q \"^cert[[:space:]]*=[[:space:]]*$CERT_PATH$\" \"$SUN_CONF\"; then sed -i \"s|^cert[[:space:]]*=.*|cert = $CERT_PATH|\" \"$SUN_CONF\"; CONFIG_CHANGED=1; fi; else echo \"cert = $CERT_PATH\" >> \"$SUN_CONF\"; CONFIG_CHANGED=1; fi; if grep -q \"^pkey[[:space:]]*=\" \"$SUN_CONF\"; then if ! grep -q \"^pkey[[:space:]]*=[[:space:]]*$KEY_PATH$\" \"$SUN_CONF\"; then sed -i \"s|^pkey[[:space:]]*=.*|pkey = $KEY_PATH|\" \"$SUN_CONF\"; CONFIG_CHANGED=1; fi; else echo \"pkey = $KEY_PATH\" >> \"$SUN_CONF\"; CONFIG_CHANGED=1; fi; chown \"$TARGET_USER:$TARGET_GROUP\" \"$SUN_CONF\"; END_DATE2=$(openssl x509 -in \"$CERT_PATH\" -noout -enddate 2>/dev/null | cut -d= -f2 || true); if [ -n \"$END_DATE2\" ]; then END_EPOCH2=$(date -d \"$END_DATE2\" +%s 2>/dev/null || echo 0); NOW_EPOCH2=$(date +%s); if [ \"$END_EPOCH2\" -gt 0 ]; then DAYS_LEFT=$(( (END_EPOCH2 - NOW_EPOCH2) / 86400 )); else DAYS_LEFT=-1; fi; else DAYS_LEFT=-1; fi; echo \"TLS_ACTION=$ACTION\"; echo \"TLS_CONFIG_CHANGED=$CONFIG_CHANGED\"; echo \"TLS_CERT_PATH=$CERT_PATH\"; echo \"TLS_KEY_PATH=$KEY_PATH\"; echo \"TLS_DAYS_LEFT=$DAYS_LEFT\"; echo \"TLS_BIND_ADDRESS=cleared\"'",
+        sunshine_user = sunshine_user,
+        threshold_days = SUNSHINE_TLS_RENEW_THRESHOLD_DAYS,
+    );
+
+    let output = tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(60)))
+        .await
+        .map_err(|error| {
+            AppError::Command(format!("Failed to join Sunshine TLS setup task: {error}"))
+        })??;
+
+    if output.status_code != 0 {
+        return Err(AppError::Provisioning(format!(
+            "Failed ensuring Sunshine TLS certificate: stdout: {} | stderr: {}",
+            output.stdout.trim(),
+            output.stderr.trim()
+        )));
+    }
+
+    let summary = output
+        .stdout
+        .lines()
+        .filter(|line| line.starts_with("TLS_"))
+        .collect::<Vec<_>>()
+        .join(" | ");
+
+    if summary.is_empty() {
+        return Err(AppError::Provisioning(
+            "Sunshine TLS setup did not produce expected TLS summary output.".to_string(),
+        ));
+    }
+
+    Ok(summary)
+}
+
+async fn bootstrap_sunshine_credentials_over_ssh(
+    context: &AppContext,
+    sunshine_username: &str,
+    sunshine_password: &str,
+) -> AppResult<()> {
+    let (remote, sunshine_user) = sunshine_ssh_remote(context).await?;
+    let escaped_username = shell_single_quote_escape(sunshine_username);
+    let escaped_password = shell_single_quote_escape(sunshine_password);
+    let command = format!(
+        "sudo -u {sunshine_user} bash -lc 'sunshine --creds '\''{username}'\'' '\''{password}'\'''",
+        sunshine_user = sunshine_user,
+        username = escaped_username,
+        password = escaped_password,
+    );
+    let output = tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+        .await
+        .map_err(|error| {
+            AppError::Command(format!(
+                "Failed to join Sunshine credential bootstrap task: {error}"
+            ))
+        })??;
+
+    if output.status_code != 0 {
+        return Err(AppError::Provisioning(format!(
+            "Failed to set Sunshine credentials over SSH: stdout: {} | stderr: {}",
+            output.stdout.trim(),
+            output.stderr.trim()
+        )));
+    }
+
+    Ok(())
+}
+
+fn sanitize_ssh_user(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .to_string()
+}
+
+fn shell_single_quote_escape(content: &str) -> String {
+    content.replace('\'', "'\\''")
+}
+
+fn recovery_stage_for_mode(mode: WireGuardSetupMode) -> SetupStage {
+    match mode {
+        WireGuardSetupMode::EmbeddedGotatun => SetupStage::WireguardWaitingForActivation,
+    }
+}
+
+fn recovery_status_for_stage(stage: SetupStage) -> WireGuardSetupStatus {
+    match stage {
+        SetupStage::WireguardWaitingForImport => WireGuardSetupStatus::WaitingForUserImport,
+        SetupStage::WireguardWaitingForActivation => WireGuardSetupStatus::WaitingForUserActivation,
+        _ => WireGuardSetupStatus::AppHandoffStarted,
+    }
+}
+
+fn recovery_orchestration_state_for_stage(stage: SetupStage) -> OrchestrationState {
+    match stage {
+        SetupStage::WireguardWaitingForImport => OrchestrationState::WireGuardWaitingForImport,
+        SetupStage::WireguardWaitingForActivation => {
+            OrchestrationState::WireGuardWaitingForActivation
+        }
+        _ => OrchestrationState::WireGuardAppHandoffStarted,
+    }
+}
+
+async fn recovery_orchestration_state(context: &AppContext) -> OrchestrationState {
+    let mode = context
+        .state
+        .read()
+        .await
+        .post_wireguard_setup
+        .wireguard_setup_mode;
+    recovery_orchestration_state_for_stage(recovery_stage_for_mode(mode))
+}
+
+async fn reset_to_wireguard_recovery_step(
+    context: &AppContext,
+    code: &str,
+    message: &str,
+    details: Option<String>,
+) -> AppResult<()> {
+    let error = SetupErrorState {
+        code: code.to_string(),
+        message: message.to_string(),
+        stage: SetupStage::SunshineVerifying,
+        retryable: true,
+        details: details.clone(),
+    };
+
+    context
+        .update_state(|state| {
+            let recovery_stage =
+                recovery_stage_for_mode(state.post_wireguard_setup.wireguard_setup_mode);
+            state.post_wireguard_setup.stage = recovery_stage;
+            state.post_wireguard_setup.wireguard_setup_status =
+                recovery_status_for_stage(recovery_stage);
+            state.post_wireguard_setup.last_error = Some(error.clone());
+            state.post_wireguard_setup.setup_complete = false;
+            state.post_wireguard_setup.paired = false;
+            state.orchestration_state = recovery_orchestration_state_for_stage(recovery_stage);
+            state.last_error = Some(message.to_string());
+        })
+        .await?;
+
+    Ok(())
+}
+
+async fn set_setup_failure(
+    context: &AppContext,
+    stage: SetupStage,
+    orchestration_state: OrchestrationState,
+    code: &str,
+    message: &str,
+    details: Option<String>,
+    retryable: bool,
+) -> AppResult<()> {
+    let error = SetupErrorState {
+        code: code.to_string(),
+        message: message.to_string(),
+        stage,
+        retryable,
+        details: details.clone(),
+    };
+
+    context
+        .update_state(|state| {
+            state.post_wireguard_setup.stage = SetupStage::Failed;
+            state.post_wireguard_setup.last_error = Some(error.clone());
+            if matches!(
+                stage,
+                SetupStage::WireguardConfigGenerated
+                    | SetupStage::WireguardAppHandoffStarted
+                    | SetupStage::WireguardWaitingForImport
+                    | SetupStage::WireguardWaitingForActivation
+                    | SetupStage::WireguardVerifying
+                    | SetupStage::WireguardConnected
+            ) {
+                state.post_wireguard_setup.wireguard_reachable_ports.clear();
+            }
+            state.post_wireguard_setup.wireguard_setup_status = if matches!(
+                stage,
+                SetupStage::WireguardConfigGenerated
+                    | SetupStage::WireguardAppHandoffStarted
+                    | SetupStage::WireguardWaitingForImport
+                    | SetupStage::WireguardWaitingForActivation
+                    | SetupStage::WireguardVerifying
+                    | SetupStage::WireguardConnected
+            ) {
+                WireGuardSetupStatus::Failed
+            } else {
+                state.post_wireguard_setup.wireguard_setup_status
+            };
+            state.orchestration_state = orchestration_state;
+            state.last_error = Some(message.to_string());
+        })
+        .await?;
+
+    Ok(())
+}
+
+async fn emit_post_wireguard_event(
+    app: &AppHandle,
+    context: &AppContext,
+    state: OrchestrationState,
+    message: &str,
+    details: Option<String>,
+    is_error: bool,
+) {
+    let event = if is_error {
+        ProvisioningEvent::error(state, message.to_string(), details)
+    } else {
+        ProvisioningEvent::info(state, message.to_string(), details)
+    };
+    context.emit_progress(app, event).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_sunshine_pin_response_body, sunshine_pairing_id, tcp_reachability};
+    use std::{net::TcpListener, time::Duration};
+
+    #[test]
+    fn sunshine_pairing_id_expands_legacy_identity() {
+        let pairing_id = sunshine_pairing_id("0123456789abcdef");
+        assert_eq!(pairing_id, "0123456789abcdef0123456789abcdef");
+        assert_eq!(pairing_id.len(), 32);
+        assert!(pairing_id.chars().all(|value| value.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn sunshine_pairing_id_preserves_current_identity() {
+        let pairing_id = sunshine_pairing_id("ABCDEF0123456789ABCDEF0123456789");
+        assert_eq!(pairing_id, "abcdef0123456789abcdef0123456789");
+    }
+
+    #[test]
+    fn reachability_reports_open_port() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test listener");
+        let port = listener.local_addr().expect("listener addr").port();
+
+        let result = tcp_reachability("127.0.0.1", &[port], Duration::from_millis(250));
+
+        assert!(result.reachable);
+        assert_eq!(result.reachable_ports, vec![port]);
+    }
+
+    #[test]
+    fn reachability_reports_closed_port() {
+        let result = tcp_reachability("127.0.0.1", &[9], Duration::from_millis(100));
+
+        assert!(!result.reachable);
+        assert!(result.reachable_ports.is_empty());
+    }
+
+    #[test]
+    fn parses_successful_sunshine_pin_response_body() {
+        let (status, error) = parse_sunshine_pin_response_body(Some(r#"{"status":true}"#));
+        assert_eq!(status, Some(true));
+        assert_eq!(error, None);
+    }
+
+    #[test]
+    fn parses_rejected_sunshine_pin_response_body() {
+        let (status, error) = parse_sunshine_pin_response_body(Some(
+            r#"{"status":false,"error":"pending session not found"}"#,
+        ));
+        assert_eq!(status, Some(false));
+        assert_eq!(error.as_deref(), Some("pending session not found"));
+    }
+}

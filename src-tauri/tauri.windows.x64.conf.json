@@ -1,0 +1,43 @@
+{
+  "bundle": {
+    "resources": [
+      "binaries/wintun-*-pc-windows-msvc.dll",
+      "binaries/wintun-LICENSE.txt",
+      "binaries/ssh-*-pc-windows-msvc.exe",
+      "binaries/scp-*-pc-windows-msvc.exe",
+      "binaries/ssh-keygen-*-pc-windows-msvc.exe",
+      "binaries/ssh-runtime/**/*",
+      "../vm-cloud-mic-agent/Cargo.toml",
+      "../vm-cloud-mic-agent/src/**/*",
+      "../network-agent/Cargo.toml",
+      "../network-agent/Cargo.lock",
+      "../network-agent/src/**/*",
+      "../network-contracts/Cargo.toml",
+      "../network-contracts/Cargo.lock",
+      "../network-contracts/src/**/*",
+      "../state-agent/Cargo.toml",
+      "../state-agent/Cargo.lock",
+      "../state-agent/rust-toolchain.toml",
+      "../state-agent/crates/**/*",
+      "../state-agent/scripts/**/*",
+      "../state-agent/systemd/**/*",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/bin/*.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/libexec/gstreamer-1.0/*scanner*.exe",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstcoreelements*.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstaudioconvert*.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstaudioresample*.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstaudiorate*.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstopus*.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstrtp*.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstudp*.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gsttypefindfunctions*.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstvolume*.dll",
+      "binaries/gstreamer/x86_64-pc-windows-msvc/lib/gstreamer-1.0/*gstwasapi*.dll"
+    ],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller"
+      }
+    }
+  }
+}

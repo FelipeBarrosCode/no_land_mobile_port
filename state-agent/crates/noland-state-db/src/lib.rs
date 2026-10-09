@@ -1,0 +1,9 @@
+//! Ephemeral SQLite runtime database. Not the durable source of truth.
+
+mod persistence;
+mod schema;
+mod store;
+
+pub use store::{RestoredPathAssociationInput, StateDb};
+
+pub const SCHEMA_VERSION: i64 = 2;

@@ -1,0 +1,2308 @@
+use std::{collections::BTreeMap, time::Duration};
+
+use base64::{engine::general_purpose::STANDARD, Engine as _};
+use tracing::{info, warn};
+
+use crate::errors::{AppError, AppResult};
+
+use super::{
+    app_config::SunshineDefaults,
+    display_profile::{common_mode_catalog, DisplayModeSpec},
+    remote_exec::RemoteExec,
+};
+
+const HEADLESS_EDID_TEMPLATE_BASE64: &str =
+    "AP///////wAQrLCgUzIwMQ4aAQS1PCJ4Ok2VqFVOoSYPUFSlSwBxT4GAqcDRwAEBAQEBAQEBtmwAoKCAKWAwIDUAVVAhAAAaAAAA/wBGMExNWDc1MzIwMVMKAAAA/ABERUxMIFUyNzEzSE0KAAAA/QBFTB5TEQAKICAgICAgACs=";
+
+pub const EDID_MIN_REFRESH_HZ: u32 = 30;
+pub const EDID_MAX_REFRESH_HZ: u32 = 240;
+
+#[derive(Debug, Clone)]
+pub struct ResolvedEdidProfile {
+    pub width: u32,
+    pub height: u32,
+    pub refresh_hz: u32,
+    pub source_label: String,
+}
+
+pub fn generate_headless_edid_base64(
+    width: u32,
+    height: u32,
+    refresh_hz: u32,
+) -> AppResult<String> {
+    if !(EDID_MIN_REFRESH_HZ..=EDID_MAX_REFRESH_HZ).contains(&refresh_hz) {
+        return Err(AppError::InvalidInput(format!(
+            "EDID refresh rate must be between {} and {} Hz",
+            EDID_MIN_REFRESH_HZ, EDID_MAX_REFRESH_HZ
+        )));
+    }
+
+    if width == 0 || height == 0 {
+        return Err(AppError::InvalidInput(
+            "EDID width and height must be non-zero".to_string(),
+        ));
+    }
+
+    // EDID detailed timing fields encode active/blanking as 12-bit values.
+    if width > 4095 || height > 4095 {
+        return Err(AppError::InvalidInput(format!(
+            "EDID DTD only supports dimensions up to 4095x4095 (got {}x{})",
+            width, height
+        )));
+    }
+
+    let mut bytes = STANDARD
+        .decode(HEADLESS_EDID_TEMPLATE_BASE64)
+        .map_err(|error| {
+            AppError::Serialization(format!("Failed to decode EDID template: {error}"))
+        })?;
+
+    if bytes.len() < 128 {
+        return Err(AppError::Serialization(
+            "EDID template is shorter than 128 bytes".to_string(),
+        ));
+    }
+
+    // Build a real detailed timing descriptor (DTD) in descriptor slot #1.
+    // We use conservative LCD-friendly blanking/sync defaults and derive pixel clock from WxH@Hz.
+    let h_blanking: u32 = 160;
+    let v_blanking: u32 = 28;
+    let h_sync_offset: u32 = 48;
+    let h_sync_width: u32 = 32;
+    let v_sync_offset: u32 = 3;
+    let v_sync_width: u32 = 5;
+
+    if h_sync_offset + h_sync_width > h_blanking {
+        return Err(AppError::Serialization(
+            "Invalid horizontal sync/blanking relationship for EDID timing".to_string(),
+        ));
+    }
+
+    if v_sync_offset + v_sync_width > v_blanking {
+        return Err(AppError::Serialization(
+            "Invalid vertical sync/blanking relationship for EDID timing".to_string(),
+        ));
+    }
+
+    let h_total = width + h_blanking;
+    let v_total = height + v_blanking;
+
+    let pixel_clock_hz = (h_total as u64)
+        .saturating_mul(v_total as u64)
+        .saturating_mul(refresh_hz as u64);
+    let mut pixel_clock_10khz = ((pixel_clock_hz + 5_000) / 10_000) as u32;
+
+    if pixel_clock_10khz == 0 {
+        return Err(AppError::InvalidInput(format!(
+            "Computed pixel clock is out of EDID DTD range: {} (10 kHz units)",
+            pixel_clock_10khz
+        )));
+    }
+
+    if pixel_clock_10khz > u16::MAX as u32 {
+        warn!(
+            "Computed pixel clock {} exceeds DTD 16-bit limit. Clamping to 65535. The guest OS will rely on explicit Xrandr cvt modelines for the true refresh rate.",
+            pixel_clock_10khz
+        );
+        pixel_clock_10khz = u16::MAX as u32;
+    }
+
+    let dtd = 54usize;
+    let pclk = pixel_clock_10khz as u16;
+    bytes[dtd] = (pclk & 0x00FF) as u8;
+    bytes[dtd + 1] = ((pclk >> 8) & 0x00FF) as u8;
+
+    bytes[dtd + 2] = (width & 0xFF) as u8;
+    bytes[dtd + 3] = (h_blanking & 0xFF) as u8;
+    bytes[dtd + 4] = (((width >> 8) & 0x0F) as u8) << 4 | ((h_blanking >> 8) & 0x0F) as u8;
+
+    bytes[dtd + 5] = (height & 0xFF) as u8;
+    bytes[dtd + 6] = (v_blanking & 0xFF) as u8;
+    bytes[dtd + 7] = (((height >> 8) & 0x0F) as u8) << 4 | ((v_blanking >> 8) & 0x0F) as u8;
+
+    bytes[dtd + 8] = (h_sync_offset & 0xFF) as u8;
+    bytes[dtd + 9] = (h_sync_width & 0xFF) as u8;
+    bytes[dtd + 10] = (((v_sync_offset & 0x0F) as u8) << 4) | ((v_sync_width & 0x0F) as u8);
+    bytes[dtd + 11] = ((((h_sync_offset >> 8) & 0x03) as u8) << 6)
+        | ((((h_sync_width >> 8) & 0x03) as u8) << 4)
+        | ((((v_sync_offset >> 4) & 0x03) as u8) << 2)
+        | (((v_sync_width >> 4) & 0x03) as u8);
+
+    // Keep image size / border bytes from template (physical size and border) for compatibility.
+    // Preserve descriptor flags byte as-is as well.
+
+    // Advertise well-known compatibility resolutions in this same EDID. The
+    // preferred/native timing remains in the DTD above; lower modes use the
+    // eight EDID standard timing slots when they are exactly representable.
+    for slot in bytes[38..54].chunks_exact_mut(2) {
+        slot.copy_from_slice(&[0x01, 0x01]);
+    }
+    let preferred = DisplayModeSpec::from_hz(width, height, refresh_hz);
+    let mut slot_index = 0usize;
+    for mode in common_mode_catalog(preferred) {
+        if mode == preferred {
+            continue;
+        }
+        let Some(encoded) = encode_standard_timing(mode) else {
+            continue;
+        };
+        let offset = 38 + slot_index * 2;
+        bytes[offset] = encoded[0];
+        bytes[offset + 1] = encoded[1];
+        slot_index += 1;
+        if slot_index == 8 {
+            break;
+        }
+    }
+
+    // Update range limits descriptor so requested refresh is within advertised range.
+    // Descriptor starts at byte 108: 00 00 00 FD 00 [min_v][max_v][min_h][max_h][max_pclk_10mhz] ...
+    let range = 108usize;
+    if bytes[range] == 0x00
+        && bytes[range + 1] == 0x00
+        && bytes[range + 2] == 0x00
+        && bytes[range + 3] == 0xFD
+    {
+        let min_v = EDID_MIN_REFRESH_HZ.min(refresh_hz).max(1);
+        let max_v = refresh_hz.max(60).min(255);
+        let min_h = 15u32;
+        let max_h = ((refresh_hz as u64)
+            .saturating_mul(v_total as u64)
+            .saturating_add(500)
+            / 1000)
+            .clamp(min_h as u64, 255) as u32;
+        let max_pclk_10mhz = ((pixel_clock_10khz + 999) / 1000).clamp(1, 255);
+
+        bytes[range + 5] = min_v as u8;
+        bytes[range + 6] = max_v as u8;
+        bytes[range + 7] = min_h as u8;
+        bytes[range + 8] = max_h as u8;
+        bytes[range + 9] = max_pclk_10mhz as u8;
+    }
+
+    let serial_seed = width
+        .wrapping_mul(31)
+        .wrapping_add(height.wrapping_mul(17))
+        .wrapping_add(refresh_hz.wrapping_mul(13));
+    bytes[12] = (serial_seed & 0xFF) as u8;
+    bytes[13] = ((serial_seed >> 8) & 0xFF) as u8;
+    bytes[14] = ((serial_seed >> 16) & 0xFF) as u8;
+    bytes[15] = ((serial_seed >> 24) & 0xFF) as u8;
+
+    let checksum: u8 = (256u16 - (bytes[..127].iter().map(|b| *b as u16).sum::<u16>() % 256)) as u8;
+    bytes[127] = checksum;
+
+    Ok(STANDARD.encode(bytes))
+}
+
+pub fn decode_headless_edid_preferred_mode(edid_base64: &str) -> AppResult<(u32, u32, u32)> {
+    let bytes = STANDARD.decode(edid_base64.trim()).map_err(|error| {
+        AppError::InvalidInput(format!("Headless EDID is not valid base64: {error}"))
+    })?;
+    if bytes.len() < 128 {
+        return Err(AppError::InvalidInput(
+            "Headless EDID is shorter than one base block".to_string(),
+        ));
+    }
+
+    let dtd = 54usize;
+    let pixel_clock_10khz = u16::from_le_bytes([bytes[dtd], bytes[dtd + 1]]) as u64;
+    if pixel_clock_10khz == 0 {
+        return Err(AppError::InvalidInput(
+            "Headless EDID has no preferred detailed timing".to_string(),
+        ));
+    }
+    let width = u32::from(bytes[dtd + 2]) | (u32::from(bytes[dtd + 4] & 0xF0) << 4);
+    let h_blanking = u32::from(bytes[dtd + 3]) | (u32::from(bytes[dtd + 4] & 0x0F) << 8);
+    let height = u32::from(bytes[dtd + 5]) | (u32::from(bytes[dtd + 7] & 0xF0) << 4);
+    let v_blanking = u32::from(bytes[dtd + 6]) | (u32::from(bytes[dtd + 7] & 0x0F) << 8);
+    let h_total = width.saturating_add(h_blanking);
+    let v_total = height.saturating_add(v_blanking);
+    if width == 0 || height == 0 || h_total == 0 || v_total == 0 {
+        return Err(AppError::InvalidInput(
+            "Headless EDID preferred timing is invalid".to_string(),
+        ));
+    }
+    let refresh_millihz = pixel_clock_10khz
+        .saturating_mul(10_000)
+        .saturating_mul(1_000)
+        .saturating_add((u64::from(h_total) * u64::from(v_total)) / 2)
+        / (u64::from(h_total) * u64::from(v_total));
+
+    Ok((width, height, refresh_millihz as u32))
+}
+
+fn encode_standard_timing(mode: DisplayModeSpec) -> Option<[u8; 2]> {
+    if mode.width < 256 || mode.width > 2_288 || mode.width % 8 != 0 {
+        return None;
+    }
+    if mode.refresh_millihz % 1_000 != 0 {
+        return None;
+    }
+    let refresh_hz = mode.refresh_millihz / 1_000;
+    if !(60..=123).contains(&refresh_hz) {
+        return None;
+    }
+
+    let aspect = if mode.width.saturating_mul(10) == mode.height.saturating_mul(16) {
+        0b00 // 16:10 in EDID 1.3+
+    } else if mode.width.saturating_mul(3) == mode.height.saturating_mul(4) {
+        0b01 // 4:3
+    } else if mode.width.saturating_mul(4) == mode.height.saturating_mul(5) {
+        0b10 // 5:4
+    } else if mode.width.saturating_mul(9) == mode.height.saturating_mul(16) {
+        0b11 // 16:9
+    } else {
+        return None;
+    };
+
+    Some([
+        (mode.width / 8 - 31) as u8,
+        (aspect << 6) | ((refresh_hz - 60) as u8),
+    ])
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayProfile {
+    pub width: u32,
+    pub height: u32,
+    pub fps: u32,
+    pub refresh_millihz: u32,
+}
+
+impl DisplayProfile {
+    pub fn from_edid_timing(
+        width: u32,
+        height: u32,
+        refresh_millihz: u32,
+        target_fps: u32,
+    ) -> Self {
+        Self {
+            width,
+            height,
+            fps: target_fps.clamp(24, 240),
+            refresh_millihz,
+        }
+    }
+
+    pub fn virtual_hz_string(&self) -> String {
+        let whole = self.refresh_millihz / 1_000;
+        let fraction = self.refresh_millihz % 1_000;
+        if fraction == 0 {
+            whole.to_string()
+        } else {
+            format!("{whole}.{fraction:03}")
+                .trim_end_matches('0')
+                .to_string()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SunshineService {
+    pub defaults: SunshineDefaults,
+}
+
+const SUNSHINE_SUPPORT_PACKAGES: &[&str] = &["pipewire", "pipewire-pulse", "wireplumber"];
+
+impl SunshineService {
+    pub fn render_config(&self, detected_capture: &str, detected_output: &str) -> String {
+        let mut values = BTreeMap::from([
+            ("port".to_string(), self.defaults.port.to_string()),
+            ("origin_web_ui_allowed".to_string(), "all".to_string()),
+            (
+                "csrf_allowed_origins".to_string(),
+                self.defaults.csrf_allowed_origins.clone(),
+            ),
+            ("system_tray".to_string(), "disabled".to_string()),
+            ("upnp".to_string(), "off".to_string()),
+            ("encoder".to_string(), self.defaults.encoder.clone()),
+            ("av1_mode".to_string(), self.defaults.av1_mode.to_string()),
+            ("hevc_mode".to_string(), self.defaults.hevc_mode.to_string()),
+            (
+                "minimum_fps_target".to_string(),
+                self.defaults.minimum_fps_target.to_string(),
+            ),
+            ("capture".to_string(), detected_capture.to_string()),
+            (
+                "nvenc_latency_over_power".to_string(),
+                self.defaults.nvenc_latency_over_power.clone(),
+            ),
+            (
+                "nvenc_preset".to_string(),
+                self.defaults.nvenc_preset.to_string(),
+            ),
+            (
+                "fec_percentage".to_string(),
+                self.defaults.fec_percentage.to_string(),
+            ),
+            ("output_name".to_string(), detected_output.to_string()),
+            (
+                "ping_timeout".to_string(),
+                self.defaults.ping_timeout.to_string(),
+            ),
+        ]);
+
+        if !self.defaults.bind_address.trim().is_empty() {
+            values.insert(
+                "bind_address".to_string(),
+                self.defaults.bind_address.clone(),
+            );
+        }
+
+        values
+            .into_iter()
+            .map(|(key, value)| format!("{key} = {value}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    pub async fn verify_resume_health(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<()> {
+        let web_probe_targets = if self.defaults.bind_address.trim().is_empty() {
+            "https://localhost:47990/pin https://127.0.0.1:47990/pin".to_string()
+        } else {
+            format!(
+                "https://localhost:47990/pin https://127.0.0.1:47990/pin https://{}:47990/pin",
+                self.defaults.bind_address
+            )
+        };
+        let health_command = format!(
+            "PROC_COUNT=$(pgrep -u {user} -x sunshine 2>/dev/null | wc -l | tr -d \" \\\t\"); WEB_OK=0; for url in {web_probe_targets}; do if curl -k -s --connect-timeout 5 \"$url\" >/dev/null 2>&1; then WEB_OK=1; WEB_URL=$url; break; fi; done; if [ \"$PROC_COUNT\" = \"1\" ] && [ \"$WEB_OK\" = \"1\" ] && ss -ltnp | grep -q ':48010 '; then echo 'SUNSHINE_HEALTHY'; echo \"WEB_URL=$WEB_URL\"; else echo 'SUNSHINE_UNHEALTHY'; echo \"PROC_COUNT=$PROC_COUNT\"; echo \"WEB_OK=$WEB_OK\"; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo '--- systemd ---'; systemctl status sunshine --no-pager 2>/dev/null || true; for url in {web_probe_targets}; do echo \"--- web $url ---\"; curl -k -I -s --connect-timeout 5 \"$url\" 2>&1 || true; done; fi",
+            user = target_user,
+            web_probe_targets = web_probe_targets,
+        );
+
+        let health = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&health_command, Duration::from_secs(20))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if health.status_code != 0 || !health.stdout.contains("SUNSHINE_HEALTHY") {
+            return Err(AppError::Provisioning(format!(
+                "Sunshine resume preflight failed for user {}. stdout: {} | stderr: {}",
+                target_user,
+                health.stdout.trim(),
+                health.stderr.trim()
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn wait_for_dpkg_lock_with_message(
+        &self,
+        remote: &RemoteExec,
+        max_wait_secs: u64,
+    ) -> AppResult<bool> {
+        super::package_manager::wait_for_dpkg_lock(remote, max_wait_secs).await
+    }
+
+    async fn check_sunshine_packages_needed(&self, remote: &RemoteExec) -> AppResult<Vec<String>> {
+        let query = SUNSHINE_SUPPORT_PACKAGES.join(" ");
+        let check = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!("dpkg-query -W -f='${{Package}}\\n' {}", query),
+                    Duration::from_secs(30),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if check.status_code != 0 {
+            info!(
+                "Package check returned {}, assuming all packages need installation",
+                check.status_code
+            );
+            return Ok(SUNSHINE_SUPPORT_PACKAGES
+                .iter()
+                .map(|s| s.to_string())
+                .collect());
+        }
+
+        let installed: std::collections::HashSet<_> = check
+            .stdout
+            .lines()
+            .map(|l| l.trim().to_lowercase())
+            .collect();
+
+        let missing: Vec<String> = SUNSHINE_SUPPORT_PACKAGES
+            .iter()
+            .filter(|p| !installed.contains(&p.to_lowercase()))
+            .map(|s| s.to_string())
+            .collect();
+
+        if missing.is_empty() {
+            info!("All Sunshine packages already installed, skipping apt-get");
+        } else {
+            info!("Missing Sunshine packages: {}", missing.join(", "));
+        }
+
+        Ok(missing)
+    }
+
+    async fn install_latest_sunshine_package(&self, remote: &RemoteExec) -> AppResult<()> {
+        let install_script = r#"set -euo pipefail
+arch=$(dpkg --print-architecture)
+. /etc/os-release
+
+case "$arch" in
+  amd64|arm64) ;;
+  *) echo "Unsupported architecture for upstream Sunshine package: $arch" >&2; exit 1 ;;
+esac
+
+asset_pattern=""
+if [ "${ID:-}" = "ubuntu" ]; then
+  case "${VERSION_ID:-}" in
+    22.04|24.04|26.04) asset_pattern="sunshine-ubuntu-${VERSION_ID}-${arch}\\.deb" ;;
+    *) echo "Unsupported Ubuntu version for upstream Sunshine package: ${VERSION_ID:-unknown}" >&2; exit 1 ;;
+  esac
+elif [ "${ID:-}" = "debian" ]; then
+  case "${VERSION_CODENAME:-}" in
+    trixie) asset_pattern="sunshine-debian-trixie-${arch}\\.deb" ;;
+    *) echo "Unsupported Debian codename for upstream Sunshine package: ${VERSION_CODENAME:-unknown}" >&2; exit 1 ;;
+  esac
+else
+  echo "Unsupported distro for upstream Sunshine package: ${ID:-unknown}" >&2
+  exit 1
+fi
+
+SUNSHINE_RELEASE_TAG="v2026.516.143833"
+tmpdir=$(mktemp -d)
+trap 'rm -rf "$tmpdir"' EXIT
+pkg_path="$tmpdir/sunshine.deb"
+release_json=$(curl -fsSL \
+  -H 'Accept: application/vnd.github+json' \
+  -H 'User-Agent: Noland-Connect' \
+  "https://api.github.com/repos/LizardByte/Sunshine/releases/tags/${SUNSHINE_RELEASE_TAG}")
+url=$(printf '%s\n' "$release_json" \
+  | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*"' \
+  | sed -E 's/.*"([^"]*)"/\1/' \
+  | grep -E -m1 "${asset_pattern}$")
+if [ -z "$url" ]; then
+  echo "No Sunshine DEB asset found for ${ID:-unknown} ${VERSION_ID:-${VERSION_CODENAME:-unknown}} ${arch}" >&2
+  exit 1
+fi
+
+curl -fsSL "$url" -o "$pkg_path"
+sudo apt-get -o DPkg::Lock::Timeout=600 update
+sudo apt-get -o DPkg::Lock::Timeout=600 install -y "$pkg_path"
+sunshine --version 2>/dev/null || /usr/bin/sunshine --version 2>/dev/null || true"#;
+
+        let result = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(install_script, Duration::from_secs(900))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if result.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed to install latest upstream Sunshine package: stdout: {} | stderr: {}",
+                result.stdout.trim(),
+                result.stderr.trim()
+            )));
+        }
+
+        info!(
+            "Installed latest upstream Sunshine package successfully: {}",
+            result.stdout.trim()
+        );
+        Ok(())
+    }
+
+    pub async fn install_and_configure(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+        display: DisplayProfile,
+        headless_edid_base64: &str,
+        sunshine_username: &str,
+        sunshine_password: &str,
+    ) -> AppResult<()> {
+        if sunshine_username.trim().is_empty() || sunshine_password.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "Sunshine username and password are required before WireGuard handoff.".to_string(),
+            ));
+        }
+        if headless_edid_base64.trim().is_empty() {
+            return Err(AppError::InvalidInput(
+                "Headless EDID is missing. Regenerate EDID from Settings before provisioning."
+                    .to_string(),
+            ));
+        }
+
+        let target_home = self.resolve_user_home(remote, target_user).await?;
+        let target_uid = self.resolve_user_uid(remote, target_user).await?;
+        let _target_gid = self.resolve_user_gid(remote, target_user).await?;
+        let packages_needed = self.check_sunshine_packages_needed(remote).await?;
+
+        if packages_needed.is_empty() {
+            info!("All Sunshine support packages already installed, skipping apt-get for dependencies");
+        } else {
+            info!(
+                "Missing Sunshine support packages: {} (need to install)",
+                packages_needed.join(", ")
+            );
+        }
+
+        // Permanently neuter unattended-upgrades so it can't re-acquire the lock
+        let disable_auto_upgrades = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "sudo systemctl stop --no-block unattended-upgrades 2>/dev/null || true; sudo systemctl disable unattended-upgrades 2>/dev/null || true; sudo systemctl mask unattended-upgrades 2>/dev/null || true; sudo rm -f /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null || true; echo 'AUTO_UPGRADES_DISABLED'",
+                    Duration::from_secs(30),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if disable_auto_upgrades.status_code != 0 {
+            warn!(
+                "Failed to disable auto-upgrades (continuing): stdout: {} | stderr: {}",
+                disable_auto_upgrades.stdout.trim(),
+                disable_auto_upgrades.stderr.trim()
+            );
+        } else {
+            info!(
+                "Auto-upgrades disabled: {}",
+                disable_auto_upgrades.stdout.trim()
+            );
+        }
+
+        let lock_acquired = self.wait_for_dpkg_lock_with_message(remote, 600).await?;
+        if !lock_acquired {
+            return Err(AppError::Provisioning(
+                "Package manager is locked by another process (likely unattended-upgrades). \
+                Waiting timed out after 10 minutes. Please try again in a few minutes when \
+                system updates have finished. Alternatively, you can SSH into the instance and \
+                run: sudo systemctl stop unattended-upgrades && sudo dpkg --configure -a"
+                    .to_string(),
+            ));
+        }
+
+        if !packages_needed.is_empty() {
+            info!(
+                "Lock acquired, installing {} missing Sunshine support packages",
+                packages_needed.len()
+            );
+            let install = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        "sudo apt-get -o DPkg::Lock::Timeout=600 update && sudo apt-get -o DPkg::Lock::Timeout=600 install -y pipewire pipewire-pulse wireplumber",
+                        Duration::from_secs(600),
+                    )
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
+
+            if install.status_code != 0 {
+                return Err(AppError::Provisioning(format!(
+                    "Failed to install Sunshine support packages: {}",
+                    install.stderr
+                )));
+            }
+
+            info!(
+                "Successfully installed {} Sunshine support packages",
+                packages_needed.len()
+            );
+        }
+
+        self.install_latest_sunshine_package(remote).await?;
+        self.cleanup_packaged_sunshine_launchers(remote, target_user, &target_home, target_uid)
+            .await?;
+        self.assert_rtsp_port_available(remote, target_user, &target_home)
+            .await?;
+
+        self.setup_headless_display(remote, target_user, display, headless_edid_base64)
+            .await?;
+
+        // Verify Xorg is running before proceeding
+        let xorg_check = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "pgrep -x Xorg >/dev/null 2>&1 && (command -v timeout >/dev/null 2>&1 && timeout 8s bash -lc 'DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --listmonitors' || DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --listmonitors) || (echo 'Xorg process not found' && exit 1)",
+                    Duration::from_secs(30),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if xorg_check.status_code != 0 {
+            let xorg_log_tail = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        "tail -120 /var/log/Xorg.0.log 2>/dev/null || echo 'Xorg log unavailable'",
+                        Duration::from_secs(20),
+                    )
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
+            let systemd_status = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        "systemctl status noland-xorg --no-pager 2>/dev/null || echo 'systemd status unavailable'",
+                        Duration::from_secs(15),
+                    )
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
+            let journalctl_tail = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        "journalctl -u noland-xorg --no-pager -n 50 2>/dev/null || echo 'journalctl unavailable'",
+                        Duration::from_secs(15),
+                    )
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
+
+            return Err(AppError::Provisioning(format!(
+                "Xorg is not running after virtual display setup. Cannot continue. Output: {} | Error: {} | Xorg log tail: {} | systemd status: {} | journalctl: {}",
+                xorg_check.stdout.trim(),
+                xorg_check.stderr.trim(),
+                xorg_log_tail.stdout.trim(),
+                systemd_status.stdout.trim(),
+                journalctl_tail.stdout.trim()
+            )));
+        }
+
+        info!("Xorg verified running: {}", xorg_check.stdout.trim());
+
+        self.setup_realtime_permissions(remote).await?;
+        self.setup_virtual_input_permissions(remote, target_user)
+            .await?;
+        self.setup_pipewire_config(remote, target_user).await?;
+
+        let detected_capture = self.detect_capture_backend(remote).await?;
+        info!("Detected capture backend: {}", detected_capture);
+
+        let detected_output = self.detect_output_name(remote, target_user).await?;
+        info!("Detected Sunshine RandR output: {}", detected_output);
+
+        self.cleanup_packaged_sunshine_launchers(remote, target_user, &target_home, target_uid)
+            .await?;
+
+        // 2. Write config using printf (reliable) and verify
+        let config = self.render_config(&detected_capture, &detected_output);
+        let config_lines: Vec<String> = config.lines().map(|l| l.to_string()).collect();
+        let printf_args = config_lines.join("' '");
+        let write_config_command = format!(
+            "sudo -u {user} mkdir -p {home}/.config/sunshine && printf '%s\n' '{printf_args}' | sudo -u {user} tee {home}/.config/sunshine/sunshine.conf > /dev/null && grep -q 'port =' {home}/.config/sunshine/sunshine.conf && echo 'CONFIG_OK' || (echo 'CONFIG_WRITE_FAILED' && exit 1)",
+            home = target_home,
+            user = target_user,
+            printf_args = printf_args
+        );
+
+        let write_config = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&write_config_command, Duration::from_secs(90))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if write_config.status_code != 0 || !write_config.stdout.contains("CONFIG_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to write Sunshine config: stdout: {} | stderr: {}",
+                write_config.stdout.trim(),
+                write_config.stderr.trim()
+            )));
+        }
+
+        // 2b. Patch apps.json to use the correct output name (Vast.ai images often have stale HDMI-1 refs)
+        let patch_apps_json = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            let target_home = target_home.to_string();
+            let detected_output = detected_output.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!(
+                        "if [ -f {home}/.config/sunshine/apps.json ]; then sudo -u {user} sed -i 's/HDMI-[0-9]*/{output}/g' {home}/.config/sunshine/apps.json && echo 'APPS_JSON_PATCHED'; else echo 'APPS_JSON_NOT_FOUND'; fi",
+                        home = target_home,
+                        user = target_user,
+                        output = detected_output
+                    ),
+                    Duration::from_secs(30),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if patch_apps_json.status_code != 0 {
+            warn!(
+                "apps.json patch failed (continuing): stdout: {} | stderr: {}",
+                patch_apps_json.stdout.trim(),
+                patch_apps_json.stderr.trim()
+            );
+        } else {
+            info!("apps.json patch result: {}", patch_apps_json.stdout.trim());
+        }
+
+        // 3. Setup display access: copy Xauthority to user home with correct group
+        let display_access = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!(
+                        "SHARED_XAUTH=\"/etc/X11/.Xauthority-noland\"; TARGET_GROUP=$(id -gn {target_user}); if [ -s \"$SHARED_XAUTH\" ]; then chown root:$TARGET_GROUP \"$SHARED_XAUTH\" && chmod 640 \"$SHARED_XAUTH\" && sudo -u {target_user} env DISPLAY=:0 XAUTHORITY=\"$SHARED_XAUTH\" xrandr --listmonitors >/dev/null && echo 'XAUTH_OK'; else echo 'XAUTH_MISSING' && exit 1; fi"
+                    ),
+                    Duration::from_secs(30),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if display_access.status_code != 0 || !display_access.stdout.contains("XAUTH_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to setup display access: stdout: {} | stderr: {}",
+                display_access.stdout.trim(),
+                display_access.stderr.trim()
+            )));
+        }
+
+        // 3b. Start desktop session if none is running (Vast.ai images often have no active session)
+        let start_desktop = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!(
+                        r#"sudo bash -lc 'set -euo pipefail
+loginctl enable-linger {user} 2>/dev/null || true
+DESKTOP_EXEC=""
+if command -v startplasma-x11 >/dev/null 2>&1; then DESKTOP_EXEC=$(command -v startplasma-x11); elif command -v gnome-session >/dev/null 2>&1; then DESKTOP_EXEC=$(command -v gnome-session); fi
+if [ -n "$DESKTOP_EXEC" ]; then
+  TARGET_UID=$(id -u {user})
+  TARGET_GROUP=$(id -gn {user})
+  cat > /etc/systemd/system/noland-desktop.service <<EOF
+[Unit]
+Description=Noland persistent desktop session
+Requires=noland-xorg.service
+After=noland-xorg.service systemd-user-sessions.service
+
+[Service]
+Type=simple
+User={user}
+Group=$TARGET_GROUP
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/etc/X11/.Xauthority-noland
+Environment=XDG_RUNTIME_DIR=/run/user/$TARGET_UID
+ExecStart=/usr/bin/dbus-run-session -- $DESKTOP_EXEC
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+  systemctl enable --now noland-desktop.service
+  echo DESKTOP_SERVICE_READY
+else
+  echo DESKTOP_EXECUTABLE_NOT_FOUND
+fi'"#,
+                        user = target_user
+                    ),
+                    Duration::from_secs(30),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        info!("Desktop session result: {}", start_desktop.stdout.trim());
+
+        // 3c. Disable screen locker for cloud VMs (KDE screen locker breaks on headless/cloud setups)
+        let disable_screen_lock = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            let target_home = target_home.to_string();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!(
+                        "sudo -u {user} bash -lc 'mkdir -p {home}/.config; export XDG_RUNTIME_DIR=/run/user/$(id -u {user}); kwriteconfig5 --file kscreenlockerrc --group Daemon --key Autolock false 2>/dev/null || true; kwriteconfig5 --file kscreenlockerrc --group Daemon --key LockOnResume false 2>/dev/null || true; kwriteconfig5 --file kwinrc --group Compositing --key Enabled false 2>/dev/null || true' && echo 'SCREEN_LOCK_DISABLED' || echo 'SCREEN_LOCK_CONFIG_FAILED'",
+                        user = target_user,
+                        home = target_home
+                    ),
+                    Duration::from_secs(15),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        info!(
+            "Screen lock disable result: {}",
+            disable_screen_lock.stdout.trim()
+        );
+
+        // 4. Open ALL Moonlight ports (TCP + UDP)
+        let firewall = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "sudo ufw allow 47984/tcp 2>/dev/null || true && sudo ufw allow 47989/tcp 2>/dev/null || true && sudo ufw allow 47990/tcp 2>/dev/null || true && sudo ufw allow 47991/tcp 2>/dev/null || true && sudo ufw allow 47998/udp 2>/dev/null || true && sudo ufw allow 47999/udp 2>/dev/null || true && sudo ufw allow 48000/udp 2>/dev/null || true && sudo ufw allow 48002/udp 2>/dev/null || true && sudo ufw allow 48010/tcp 2>/dev/null || true && sudo iptables -I INPUT -p tcp --dport 47984 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p tcp --dport 47989 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p tcp --dport 47990 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p tcp --dport 47991 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p udp --dport 47998 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p udp --dport 47999 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p udp --dport 48000 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p udp --dport 48002 -j ACCEPT 2>/dev/null || true && sudo iptables -I INPUT -p tcp --dport 48010 -j ACCEPT 2>/dev/null || true && echo 'FIREWALL_OK'",
+                    Duration::from_secs(60),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if firewall.status_code != 0 {
+            warn!(
+                "Firewall setup had issues (continuing): stdout: {} | stderr: {}",
+                firewall.stdout.trim(),
+                firewall.stderr.trim()
+            );
+        }
+
+        self.assert_rtsp_port_available(remote, target_user, &target_home)
+            .await?;
+
+        // 5. Install and start Sunshine as a systemd system service running as {target_user}
+        let has_noland_xorg = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "systemctl cat noland-xorg.service >/dev/null 2>&1",
+                    Duration::from_secs(15),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            .status_code
+                == 0
+        };
+        let display_dependencies = if has_noland_xorg {
+            "Requires=noland-xorg.service\nAfter=noland-xorg.service noland-desktop.service network-online.target\nWants=noland-desktop.service network-online.target"
+        } else {
+            "After=graphical-session.target network-online.target\nWants=network-online.target"
+        };
+        let sunshine_xauthority = if has_noland_xorg {
+            "/etc/X11/.Xauthority-noland".to_string()
+        } else {
+            format!("{target_home}/.Xauthority")
+        };
+        let service_content = format!(
+            r#"[Unit]
+Description=Sunshine Game Stream Host
+{display_dependencies}
+
+[Service]
+Type=simple
+User={target_user}
+Group={target_group}
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY={sunshine_xauthority}"
+Environment="XDG_RUNTIME_DIR=/run/user/{target_uid}"
+Environment="HOME={target_home}"
+WorkingDirectory={target_home}
+ExecStart=/usr/bin/sunshine
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target"#,
+            display_dependencies = display_dependencies,
+            sunshine_xauthority = sunshine_xauthority,
+            target_user = target_user,
+            target_group = self.resolve_user_group(remote, target_user).await?,
+            target_home = target_home,
+            target_uid = target_uid,
+        );
+
+        let prepare_service_cmd =
+            "sudo bash -lc 'systemctl stop sunshine 2>/dev/null || true; systemctl disable sunshine 2>/dev/null || true; systemctl unmask sunshine 2>/dev/null || true; rm -f /etc/systemd/system/sunshine.service; echo SERVICE_PREPARED'";
+        let write_service_cmd = format!(
+            "sudo bash -lc 'cat > /etc/systemd/system/sunshine.service <<\"EOF\"\n{}\nEOF\nchmod 644 /etc/systemd/system/sunshine.service; test -f /etc/systemd/system/sunshine.service && echo SERVICE_WRITTEN'",
+            shell_single_quote_escape(&service_content),
+        );
+        let daemon_reload_cmd = "sudo bash -lc 'systemctl daemon-reload && echo DAEMON_RELOADED'";
+        let enable_service_cmd =
+            "sudo bash -lc 'systemctl enable sunshine && echo SERVICE_ENABLED'";
+        let clear_ports_cmd =
+            "sudo bash -lc 'for port in 47984 47989 47990 47991 48010; do fuser -k ${port}/tcp 2>/dev/null || true; done; for port in 47998 47999 48000 48002; do fuser -k ${port}/udp 2>/dev/null || true; done; echo PORTS_CLEARED'";
+        let restart_service_cmd =
+            "sudo bash -lc 'systemctl restart sunshine && echo SERVICE_RESTARTED'";
+
+        let prepare_service = {
+            let remote = remote.clone();
+            let command = prepare_service_cmd.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if prepare_service.status_code != 0 || !prepare_service.stdout.contains("SERVICE_PREPARED")
+        {
+            return Err(AppError::Provisioning(format!(
+                "Failed to prepare Sunshine systemd service path. stdout: {} | stderr: {}",
+                prepare_service.stdout.trim(),
+                prepare_service.stderr.trim()
+            )));
+        }
+
+        let write_service = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&write_service_cmd, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if write_service.status_code != 0 || !write_service.stdout.contains("SERVICE_WRITTEN") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to write Sunshine systemd service. stdout: {} | stderr: {}",
+                write_service.stdout.trim(),
+                write_service.stderr.trim()
+            )));
+        }
+
+        let daemon_reload = {
+            let remote = remote.clone();
+            let command = daemon_reload_cmd.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if daemon_reload.status_code != 0 || !daemon_reload.stdout.contains("DAEMON_RELOADED") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to reload systemd after writing Sunshine service. stdout: {} | stderr: {}",
+                daemon_reload.stdout.trim(),
+                daemon_reload.stderr.trim()
+            )));
+        }
+
+        let enable_service = {
+            let remote = remote.clone();
+            let command = enable_service_cmd.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if enable_service.status_code != 0 || !enable_service.stdout.contains("SERVICE_ENABLED") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to enable Sunshine systemd service. stdout: {} | stderr: {}",
+                enable_service.stdout.trim(),
+                enable_service.stderr.trim()
+            )));
+        }
+
+        let clear_ports = {
+            let remote = remote.clone();
+            let command = clear_ports_cmd.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if clear_ports.status_code != 0 || !clear_ports.stdout.contains("PORTS_CLEARED") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to clear Sunshine ports before restart. stdout: {} | stderr: {}",
+                clear_ports.stdout.trim(),
+                clear_ports.stderr.trim()
+            )));
+        }
+
+        let restart_service = {
+            let remote = remote.clone();
+            let command = restart_service_cmd.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if restart_service.status_code != 0 || !restart_service.stdout.contains("SERVICE_RESTARTED")
+        {
+            return Err(AppError::Provisioning(format!(
+                "Failed to restart Sunshine systemd service. stdout: {} | stderr: {}",
+                restart_service.stdout.trim(),
+                restart_service.stderr.trim()
+            )));
+        }
+
+        // Give Sunshine time to initialize before checking
+        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        let web_probe_targets = if self.defaults.bind_address.trim().is_empty() {
+            "https://localhost:47990/pin https://127.0.0.1:47990/pin".to_string()
+        } else {
+            format!(
+                "https://localhost:47990/pin https://127.0.0.1:47990/pin https://{}:47990/pin",
+                self.defaults.bind_address
+            )
+        };
+
+        // Call 2: verify process is alive, running as correct user, and web UI responds
+        let verify_cmd = format!(
+            "pgrep -u {user} -x sunshine >/dev/null 2>&1 && WEB_OK=0; for url in {web_probe_targets}; do if curl -k -s --connect-timeout 5 \"$url\" >/dev/null 2>&1; then WEB_OK=1; break; fi; done; if [ \"$WEB_OK\" = \"1\" ] && ss -ltnp | grep -q ':48010 '; then echo 'SUNSHINE_STARTED'; else journalctl -u sunshine --no-pager -n 40 2>/dev/null; echo '--- ss ---'; ss -ltnp 2>/dev/null | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo 'SUNSHINE_FAILED'; fi",
+            user = target_user,
+            web_probe_targets = web_probe_targets,
+        );
+
+        let verify = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&verify_cmd, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if verify.status_code != 0 || !verify.stdout.contains("SUNSHINE_STARTED") {
+            return Err(AppError::Provisioning(format!(
+                "Failed to start Sunshine as user {user}. stdout: {stdout} | stderr: {stderr}",
+                user = target_user,
+                stdout = verify.stdout.trim(),
+                stderr = verify.stderr.trim()
+            )));
+        }
+
+        // 6. Health check: verify web UI and protocol ports respond
+        let health_check = {
+            let remote = remote.clone();
+            let web_probe_targets = web_probe_targets.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!(
+                        "WEB_OK=0; for url in {web_probe_targets}; do if curl -k -s --connect-timeout 10 \"$url\" >/dev/null 2>&1; then WEB_OK=1; break; fi; done; if [ \"$WEB_OK\" = \"1\" ] && ss -ltnp | grep -q ':48010 '; then echo 'HEALTH_OK'; else echo 'HEALTH_FAIL'; fi"
+                    ),
+                    Duration::from_secs(30),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if health_check.status_code != 0 || !health_check.stdout.contains("HEALTH_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Sunshine health check failed (web UI not responding). stdout: {} | stderr: {}",
+                health_check.stdout.trim(),
+                health_check.stderr.trim()
+            )));
+        }
+
+        self.bootstrap_web_credentials(remote, target_user, sunshine_username, sunshine_password)
+            .await?;
+
+        info!(
+            "Sunshine Web UI available at https://<wireguard-ip>:47990 (use HTTPS, accept self-signed cert)"
+        );
+        info!(
+            "Sunshine Web UI credentials provisioned for the configured platform user before WireGuard handoff."
+        );
+
+        let apply_affinity = {
+            let remote = remote.clone();
+            let cpu_affinity = self.defaults.cpu_affinity.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!(
+                        "for pid in $(pgrep -x sunshine); do taskset -pc {cpu_affinity} \"$pid\" || sudo taskset -pc {cpu_affinity} \"$pid\" || true; done"
+                    ),
+                    Duration::from_secs(60),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if apply_affinity.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed to apply Sunshine CPU affinity: {}",
+                apply_affinity.stderr
+            )));
+        }
+
+        self.validate(remote, target_user, display).await
+    }
+
+    async fn setup_headless_display(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+        display: DisplayProfile,
+        headless_edid_base64: &str,
+    ) -> AppResult<()> {
+        let target_home = self.resolve_user_home(remote, target_user).await?;
+        let target_user_owned = target_user.to_string();
+        let uid = {
+            let remote = remote.clone();
+            let tu = target_user_owned.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&format!("id -u {tu}"), Duration::from_secs(10))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        let _uid: u32 = uid.stdout.trim().parse().unwrap_or(1000);
+
+        let real_display_count: usize = {
+            let remote = remote.clone();
+            let probe = tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    r#"nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1 || { echo 0; exit 0; }; if command -v timeout >/dev/null 2>&1; then timeout 8s bash -lc "DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr 2>/dev/null | grep -c '+'" || echo 0; else DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr 2>/dev/null | grep -c '+' || echo 0; fi"#,
+                    Duration::from_secs(15),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))?;
+
+            match probe {
+                Ok(output) => output.stdout.trim().parse().unwrap_or(0),
+                Err(AppError::Timeout(error)) => {
+                    warn!("Display probe timed out (treating as headless): {}", error);
+                    0
+                }
+                Err(error) => return Err(error),
+            }
+        };
+
+        let is_headless = real_display_count == 0;
+
+        if !is_headless {
+            info!("Real display detected. Skipping virtual display setup, using existing Xorg.");
+            let create_user_dirs = format!(
+                "sudo -u {target_user} mkdir -p {home}/.config/pipewire/pipewire.conf.d {home}/.config/wireplumber {home}/.config/systemd/user",
+                target_user = target_user,
+                home = target_home
+            );
+            let output = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(&create_user_dirs, Duration::from_secs(30))
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
+            if output.status_code != 0 {
+                return Err(AppError::Provisioning(format!(
+                    "Failed to create user config directories: {}",
+                    output.stderr
+                )));
+            }
+            return Ok(());
+        }
+
+        let width = display.width;
+        let height = display.height;
+        let target_fps = display.fps;
+        let virtual_hz = display.virtual_hz_string();
+
+        info!(
+            "Setting up virtual display for NVFBC/Xorg-only capture: {}x{} @ {}Hz (target {} FPS = {} Hz virtual display)",
+            width, height, virtual_hz, target_fps, virtual_hz
+        );
+
+        let detected_gpu_output = self.detect_gpu_output(remote).await?;
+        let gpu_output = if detected_gpu_output.trim().is_empty() {
+            warn!("GPU output detection returned empty connector; falling back to DFP-0");
+            "DFP-0".to_string()
+        } else {
+            detected_gpu_output
+        };
+        info!("Detected GPU output: {}", gpu_output);
+
+        let xorg_config = format!(
+            r#"Section "ServerLayout"
+   Identifier "TwinLayout"
+   Screen 0 "metaScreen" 0 0
+EndSection
+
+Section "Monitor"
+   Identifier "Monitor0"
+   Option "Enable" "true"
+EndSection
+
+Section "Device"
+   Identifier "Card0"
+   Driver "nvidia"
+   VendorName "NVIDIA Corporation"
+   Option "MetaModes" "{w}x{h}"
+   Option "UseDisplayDevice" "{output}"
+   Option "ConnectedMonitor" "{output}"
+   Option "CustomEDID" "{output}:/etc/X11/edid.bin"
+   Option "IgnoreEDIDChecksum" "{output}"
+   Option "HardDPMS" "false"
+   Option "ModeDebug" "True"
+   Option "ModeValidation" "NoVirtualSizeCheck,NoMaxPClkCheck,NoHorizSyncCheck,NoVertRefreshCheck,AllowNonEdidModes"
+   Option "AllowEmptyInitialConfiguration" "True"
+EndSection
+
+Section "Screen"
+   Identifier "metaScreen"
+   Device "Card0"
+   Monitor "Monitor0"
+   DefaultDepth 24
+   SubSection "Display"
+       Depth 24
+   EndSubSection
+EndSection
+"#,
+            w = width,
+            h = height,
+            output = gpu_output,
+        );
+
+        let xorg_config_without_connected = format!(
+            r#"Section "ServerLayout"
+   Identifier "TwinLayout"
+   Screen 0 "metaScreen" 0 0
+EndSection
+
+Section "Monitor"
+   Identifier "Monitor0"
+   Option "Enable" "true"
+EndSection
+
+Section "Device"
+   Identifier "Card0"
+   Driver "nvidia"
+   VendorName "NVIDIA Corporation"
+   Option "MetaModes" "{w}x{h}"
+   Option "UseDisplayDevice" "{output}"
+   Option "CustomEDID" "{output}:/etc/X11/edid.bin"
+   Option "IgnoreEDIDChecksum" "{output}"
+   Option "HardDPMS" "false"
+   Option "ModeDebug" "True"
+   Option "ModeValidation" "NoVirtualSizeCheck,NoMaxPClkCheck,NoHorizSyncCheck,NoVertRefreshCheck,AllowNonEdidModes"
+   Option "AllowEmptyInitialConfiguration" "True"
+EndSection
+
+Section "Screen"
+   Identifier "metaScreen"
+   Device "Card0"
+   Monitor "Monitor0"
+   DefaultDepth 24
+   SubSection "Display"
+       Depth 24
+   EndSubSection
+EndSection
+"#,
+            w = width,
+            h = height,
+            output = gpu_output,
+        );
+
+        let shell_script = format!(
+            r#"set -euo pipefail
+
+VIRT_W={w}
+VIRT_H={h}
+GPU_OUTPUT="{output}"
+TARGET_USER="{target_user}"
+TARGET_UID="{uid}"
+TARGET_GROUP="$(id -gn "$TARGET_USER" 2>/dev/null || echo "$TARGET_USER")"
+SHARED_XAUTH="/etc/X11/.Xauthority-noland"
+
+echo "=== Noland TwinView Virtual Display Setup ==="
+echo "Resolution: ${{VIRT_W}}x${{VIRT_H}}"
+echo "GPU Output: ${{GPU_OUTPUT}}"
+echo "Target User: ${{TARGET_USER}}"
+
+# 1. Set DRM permissions for NVIDIA capture and add user to required groups
+echo "Setting DRM permissions..."
+sudo chmod 666 /dev/dri/card0 2>/dev/null || true
+sudo chmod 666 /dev/dri/renderD128 2>/dev/null || true
+sudo usermod -aG video "$TARGET_USER" 2>/dev/null || true
+sudo usermod -aG audio "$TARGET_USER" 2>/dev/null || true
+sudo usermod -aG render "$TARGET_USER" 2>/dev/null || true
+
+# 2. Install NVIDIA xorg config with persisted synthetic EDID
+echo "Installing NVIDIA Xorg virtual display config + synthetic EDID..."
+sudo mkdir -p /etc/X11
+sudo bash -lc 'base64 -d > /etc/X11/edid.bin <<'"'"'EDIDEOF'"'"'
+{headless_edid}
+EDIDEOF'
+sudo chmod 644 /etc/X11/edid.bin
+sudo mkdir -p /etc/X11/xorg.conf.d
+sudo tee /etc/X11/xorg.conf.d/30-nvidia-virtual.conf > /dev/null <<'XORGEOF'
+{xorg_config}
+XORGEOF
+echo "Xorg config installed"
+
+sudo tee /etc/X11/xorg.conf.d/31-nvidia-virtual-fallback.conf > /dev/null <<'XORGFALLBACKEOF'
+{xorg_config_without_connected}
+XORGFALLBACKEOF
+echo "Xorg fallback config installed"
+
+# 3. STOP DISPLAY MANAGERS (prevents auto-restart of Xorg)
+echo "Stopping display managers..."
+sudo systemctl stop gdm 2>/dev/null || true
+sudo systemctl stop sddm 2>/dev/null || true
+sudo systemctl stop lightdm 2>/dev/null || true
+sudo systemctl mask gdm 2>/dev/null || true
+sudo systemctl mask sddm 2>/dev/null || true
+sudo systemctl mask lightdm 2>/dev/null || true
+sleep 2
+
+# 4. Stop any existing Xorg service and clean up stale Xauthority
+echo "Stopping existing Xorg..."
+sudo systemctl stop noland-xorg 2>/dev/null || true
+sudo pkill -9 Xorg 2>/dev/null || true
+rm -f /root/.Xauthority $SHARED_XAUTH 2>/dev/null || true
+sleep 2
+
+# 5. Create shared Xauthority file accessible by both root and user
+echo "Creating shared Xauthority..."
+rm -f $SHARED_XAUTH
+touch $SHARED_XAUTH
+chmod 600 $SHARED_XAUTH
+# Add both cookie forms required by different Xorg builds
+COOKIE_HEX=$(openssl rand -hex 16)
+xauth -f $SHARED_XAUTH add :0 . $COOKIE_HEX
+xauth -f $SHARED_XAUTH add $(hostname)/unix:0 . $COOKIE_HEX
+chown root:$TARGET_GROUP $SHARED_XAUTH
+chmod 640 $SHARED_XAUTH
+echo "Xauthority entries:"
+xauth -f $SHARED_XAUTH list || true
+
+# 6. Install systemd service for Xorg (survives SSH disconnect)
+echo "Installing noland-xorg systemd service..."
+sudo tee /etc/systemd/system/noland-xorg.service > /dev/null <<'SYSTEMDEOF'
+[Unit]
+Description=Noland Virtual Xorg Display
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=/etc/X11/.Xauthority-noland"
+ExecStart=/usr/bin/Xorg :0 -config /etc/X11/xorg.conf.d/30-nvidia-virtual.conf -auth /etc/X11/.Xauthority-noland -logfile /var/log/Xorg.0.log -novtswitch -logverbose 7
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMDEOF
+sudo systemctl daemon-reload
+
+# 6a. Enable and start Xorg via systemd so the virtual display survives reboot.
+echo "Starting Xorg with virtual display config..."
+sudo systemctl enable noland-xorg
+sudo systemctl start noland-xorg
+
+# Retry check for up to 20 seconds (some VMs are slow to initialize the NVIDIA driver)
+XORG_READY=false
+for i in $(seq 1 20); do
+    sleep 1
+    if sudo systemctl is-active noland-xorg >/dev/null 2>&1; then
+        echo "Xorg service active after $i seconds"
+        XORG_READY=true
+        break
+    fi
+done
+
+if [ "$XORG_READY" != "true" ]; then
+    echo "Xorg failed to start with ConnectedMonitor=${{GPU_OUTPUT}}. Checking log..."
+    echo "--- systemd status ---"
+    sudo systemctl status noland-xorg --no-pager 2>/dev/null || true
+    echo "--- journalctl ---"
+    sudo journalctl -u noland-xorg --no-pager -n 50 2>/dev/null || true
+    echo "--- Xorg log ---"
+    tail -80 /var/log/Xorg.0.log 2>/dev/null || true
+    echo "Retrying Xorg without ConnectedMonitor..."
+    sudo systemctl stop noland-xorg 2>/dev/null || true
+    sudo pkill -9 Xorg 2>/dev/null || true
+    sleep 2
+
+    # Update service to use fallback config
+    sudo tee /etc/systemd/system/noland-xorg.service > /dev/null <<'SYSTEMDEOF'
+[Unit]
+Description=Noland Virtual Xorg Display
+After=systemd-user-sessions.service
+
+[Service]
+Type=simple
+Environment="DISPLAY=:0"
+Environment="XAUTHORITY=/etc/X11/.Xauthority-noland"
+ExecStart=/usr/bin/Xorg :0 -config /etc/X11/xorg.conf.d/31-nvidia-virtual-fallback.conf -auth /etc/X11/.Xauthority-noland -logfile /var/log/Xorg.0.log -novtswitch -logverbose 7
+Restart=on-failure
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
+SYSTEMDEOF
+    sudo systemctl daemon-reload
+    sudo systemctl enable noland-xorg
+    sudo systemctl start noland-xorg
+
+    FALLBACK_READY=false
+    for i in $(seq 1 20); do
+        sleep 1
+        if sudo systemctl is-active noland-xorg >/dev/null 2>&1; then
+            echo "Xorg fallback service active after $i seconds"
+            FALLBACK_READY=true
+            break
+        fi
+    done
+    if [ "$FALLBACK_READY" != "true" ]; then
+        echo "Xorg fallback start also failed. Checking log..."
+        echo "--- systemd status ---"
+        sudo systemctl status noland-xorg --no-pager 2>/dev/null || true
+        echo "--- journalctl ---"
+        sudo journalctl -u noland-xorg --no-pager -n 50 2>/dev/null || true
+        echo "--- Xorg log ---"
+        tail -100 /var/log/Xorg.0.log 2>/dev/null || true
+        exit 1
+    fi
+fi
+
+echo "Xorg is running: $(pgrep -a Xorg | head -1)"
+
+# Re-sync Xauthority after Xorg startup (Xorg may have added/changed cookies)
+echo "Re-syncing Xauthority after Xorg startup..."
+sleep 2
+if [ -f /root/.Xauthority ]; then
+    xauth -f /root/.Xauthority list | while read entry; do
+        if [ -n "$entry" ]; then
+            xauth -f $SHARED_XAUTH add $entry 2>/dev/null || true
+        fi
+    done
+fi
+# Do NOT use xhost +local: - it is a security hole. Rely on Xauthority instead.
+
+# Keep display managers masked: noland-xorg exclusively owns display :0.
+
+# 7. Wait for display to be ready
+echo "Waiting for display..."
+for i in $(seq 1 30); do
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xdpyinfo >/dev/null 2>&1; then
+            echo "Display ready after $i seconds"
+            break
+        fi
+    elif env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xdpyinfo >/dev/null 2>&1; then
+        echo "Display ready after $i seconds"
+        break
+    fi
+    if [ $i -eq 30 ]; then
+        echo "WARNING: Display not ready after 30 seconds"
+    fi
+    sleep 1
+done
+
+# 7.1 Force target mode for Sunshine/Moonlight consistency
+echo "Enforcing target display mode ${{VIRT_W}}x${{VIRT_H}} @ {vhz}Hz..."
+if command -v timeout >/dev/null 2>&1; then
+    ACTIVE_OUTPUT=$(timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query 2>/dev/null | awk '/ connected/{{print $1; exit}}' || true)
+else
+    ACTIVE_OUTPUT=$(DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query | awk '/ connected/{{print $1; exit}}' || true)
+fi
+if [ -n "$ACTIVE_OUTPUT" ]; then
+    HAS_MODE=1
+    if command -v timeout >/dev/null 2>&1; then
+        if timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query 2>/dev/null | grep -q " ${{VIRT_W}}x${{VIRT_H}}"; then
+            HAS_MODE=0
+        fi
+    elif env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --query 2>/dev/null | grep -q " ${{VIRT_W}}x${{VIRT_H}}"; then
+        HAS_MODE=0
+    fi
+    if [ "$HAS_MODE" -ne 0 ]; then
+        MODELINE=$(cvt -r "$VIRT_W" "$VIRT_H" {vhz} 2>/dev/null | sed -n '2p' || true)
+        MODE_NAME=$(echo "$MODELINE" | awk '{{print $2}}' || true)
+        MODELINE_NO_PREFIX=$(echo "$MODELINE" | sed 's/^Modeline //')
+        if [ -n "$MODELINE" ] && [ -n "$MODE_NAME" ]; then
+            if command -v timeout >/dev/null 2>&1; then
+                timeout 8s sh -c 'env DISPLAY=:0 XAUTHORITY="$1" xrandr --newmode $2 2>/dev/null || true' _ "$SHARED_XAUTH" "$MODELINE_NO_PREFIX"
+                timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --addmode "$ACTIVE_OUTPUT" "$MODE_NAME" 2>/dev/null || true
+                timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "$MODE_NAME" 2>/dev/null || true
+            else
+                DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --newmode ${{MODELINE#Modeline }} 2>/dev/null || true
+                DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --addmode "$ACTIVE_OUTPUT" "$MODE_NAME" 2>/dev/null || true
+                DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "$MODE_NAME" 2>/dev/null || true
+            fi
+        fi
+    else
+        if command -v timeout >/dev/null 2>&1; then
+            timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "${{VIRT_W}}x${{VIRT_H}}" --rate {vhz} 2>/dev/null || true
+        else
+            DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --output "$ACTIVE_OUTPUT" --mode "${{VIRT_W}}x${{VIRT_H}}" --rate {vhz} 2>/dev/null || true
+        fi
+    fi
+fi
+
+# 8. Keep one canonical Xauthority shared by Xorg, Sunshine, and the desktop.
+sudo chown root:$TARGET_GROUP $SHARED_XAUTH
+sudo chmod 640 $SHARED_XAUTH
+
+# 9. Verify Xorg is running and user can access the display
+echo "=== Verification ==="
+echo "Xorg: $(pgrep -a Xorg | head -1 || echo 'NOT RUNNING')"
+echo "Xrandr monitors:"
+if command -v timeout >/dev/null 2>&1; then
+    timeout 8s env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --listmonitors 2>/dev/null || echo "xrandr FAILED"
+else
+    DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --listmonitors 2>/dev/null || echo "xrandr FAILED"
+fi
+echo "Xrandr full output:"
+if command -v timeout >/dev/null 2>&1; then
+    timeout 8s sh -c 'env DISPLAY=:0 XAUTHORITY="$1" xrandr 2>/dev/null | head -20' _ "$SHARED_XAUTH" || echo "xrandr FAILED"
+else
+    DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr 2>/dev/null | head -20 || echo "xrandr FAILED"
+fi
+echo "Testing user display access..."
+if command -v timeout >/dev/null 2>&1; then
+    if timeout 8s sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --listmonitors >/dev/null 2>&1; then
+        echo "USER_DISPLAY_ACCESS=OK"
+    else
+        echo "USER_DISPLAY_ACCESS=FAIL"
+    fi
+elif sudo -u "$TARGET_USER" env DISPLAY=:0 XAUTHORITY=$SHARED_XAUTH xrandr --listmonitors >/dev/null 2>&1; then
+    echo "USER_DISPLAY_ACCESS=OK"
+else
+    echo "USER_DISPLAY_ACCESS=FAIL"
+fi
+echo "=== Setup Complete ==="
+"#,
+            w = width,
+            h = height,
+            output = gpu_output,
+            target_user = target_user,
+            uid = _uid,
+            xorg_config = xorg_config,
+            xorg_config_without_connected = xorg_config_without_connected,
+            headless_edid = headless_edid_base64,
+            vhz = virtual_hz,
+        );
+
+        let escaped_shell = shell_single_quote_escape(&shell_script);
+        let install_cmd = format!("sudo bash -lc '{}'", escaped_shell);
+
+        let output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&install_cmd, Duration::from_secs(300)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if output.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed to setup NVIDIA virtual display (exit {}): stdout: {} | stderr: {}",
+                output.status_code,
+                output.stdout.trim(),
+                output.stderr.trim()
+            )));
+        }
+
+        info!(
+            "NVIDIA TwinView virtual display setup output: {}",
+            output.stdout.trim()
+        );
+
+        let create_user_dirs = format!(
+            "sudo -u {target_user} mkdir -p {home}/.config/pipewire/pipewire.conf.d {home}/.config/wireplumber {home}/.config/systemd/user",
+            target_user = target_user,
+            home = target_home
+        );
+        let output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&create_user_dirs, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if output.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed to create user config directories: {}",
+                output.stderr
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn bootstrap_web_credentials(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+        sunshine_username: &str,
+        sunshine_password: &str,
+    ) -> AppResult<()> {
+        let escaped_username = shell_single_quote_escape(sunshine_username);
+        let escaped_password = shell_single_quote_escape(sunshine_password);
+        let set_creds_command = format!(
+            "sudo -u {target_user} bash -lc 'sunshine --creds '\''{escaped_username}'\'' '\''{escaped_password}'\'''",
+            target_user = target_user,
+            escaped_username = escaped_username,
+            escaped_password = escaped_password,
+        );
+
+        let set_creds = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&set_creds_command, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if set_creds.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed to provision Sunshine web credentials. stdout: {} | stderr: {}",
+                set_creds.stdout.trim(),
+                set_creds.stderr.trim()
+            )));
+        }
+
+        let verify_command = format!(
+            "curl -k -sS --connect-timeout 10 -u '\''{escaped_username}'\'':'\''{escaped_password}'\'' https://localhost:47990/api/config >/dev/null && echo CREDS_OK || echo CREDS_FAIL",
+            escaped_username = escaped_username,
+            escaped_password = escaped_password,
+        );
+        let verify = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&verify_command, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if verify.status_code != 0 || !verify.stdout.contains("CREDS_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Sunshine credentials were set, but API auth verification failed. stdout: {} | stderr: {}",
+                verify.stdout.trim(),
+                verify.stderr.trim()
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn detect_gpu_output(&self, remote: &RemoteExec) -> AppResult<String> {
+        let query_dfp = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "nvidia-xconfig --query-gpu-info 2>/dev/null | awk '/DFP-[0-9]+/{print $1}' | tr -d ':' | head -1",
+                    Duration::from_secs(15),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        let dfp_output = query_dfp.stdout.trim();
+        if query_dfp.status_code == 0 && !dfp_output.is_empty() {
+            info!(
+                "Detected NVIDIA DFP connector from nvidia-xconfig: {}",
+                dfp_output
+            );
+            return Ok(dfp_output.to_string());
+        }
+
+        let gpu_info = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1",
+                    Duration::from_secs(15),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if gpu_info.status_code == 0 && !gpu_info.stdout.trim().is_empty() {
+            info!(
+                "Detected GPU '{}', defaulting headless connector to DFP-0",
+                gpu_info.stdout.trim()
+            );
+            return Ok("DFP-0".to_string());
+        }
+
+        warn!("Could not detect NVIDIA GPU connector, defaulting to DFP-0");
+        Ok("DFP-0".to_string())
+    }
+
+    async fn resolve_user_home(&self, remote: &RemoteExec, target_user: &str) -> AppResult<String> {
+        let lookup_command = format!("getent passwd {} | cut -d: -f6", target_user);
+        let lookup = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&lookup_command, Duration::from_secs(15))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if lookup.status_code == 0 {
+            let home = lookup.stdout.trim();
+            if !home.is_empty() {
+                return Ok(home.to_string());
+            }
+        }
+
+        if target_user == "root" {
+            Ok("/root".to_string())
+        } else {
+            Ok(format!("/home/{target_user}"))
+        }
+    }
+
+    async fn resolve_user_uid(&self, remote: &RemoteExec, target_user: &str) -> AppResult<u32> {
+        let uid_command = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&format!("id -u {target_user}"), Duration::from_secs(10))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        uid_command.stdout.trim().parse::<u32>().map_err(|error| {
+            AppError::Provisioning(format!("Failed to resolve UID for {target_user}: {error}"))
+        })
+    }
+
+    async fn resolve_user_gid(&self, remote: &RemoteExec, target_user: &str) -> AppResult<u32> {
+        let gid_command = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&format!("id -g {target_user}"), Duration::from_secs(10))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        gid_command.stdout.trim().parse::<u32>().map_err(|error| {
+            AppError::Provisioning(format!("Failed to resolve GID for {target_user}: {error}"))
+        })
+    }
+
+    async fn resolve_user_group(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<String> {
+        let group_command = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&format!("id -gn {target_user}"), Duration::from_secs(10))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        let group = group_command.stdout.trim();
+        if group.is_empty() {
+            Ok(target_user.to_string())
+        } else {
+            Ok(group.to_string())
+        }
+    }
+
+    async fn cleanup_packaged_sunshine_launchers(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+        target_home: &str,
+        target_uid: u32,
+    ) -> AppResult<()> {
+        let system_cleanup_command = "sudo bash -lc 'systemctl stop sunshine 2>/dev/null || true; systemctl disable sunshine 2>/dev/null || true; systemctl mask sunshine 2>/dev/null || true; pkill -9 -x sunshine 2>/dev/null || true; rm -f /etc/xdg/autostart/*Sunshine*.desktop /etc/xdg/autostart/*sunshine*.desktop 2>/dev/null || true; rm -f /tmp/sunshine-start-*.log 2>/dev/null || true; rm -rf /root/.config/sunshine 2>/dev/null || true; for port in 47984 47989 47990 47991 48010; do fuser -k ${port}/tcp 2>/dev/null || true; done; for port in 47998 47999 48000 48002; do fuser -k ${port}/udp 2>/dev/null || true; done; echo CLEANUP_SYSTEM_OK'";
+        let user_cleanup_command = format!(
+            "sudo -u {user} bash -lc 'rm -f {home}/.config/autostart/*Sunshine*.desktop {home}/.config/autostart/*sunshine*.desktop; rm -f {home}/.config/systemd/user/sunshine.service {home}/.config/systemd/user/app-org.lizardbyte.sunshine@autostart.service; rm -f {home}/.config/systemd/user/default.target.wants/sunshine.service {home}/.config/systemd/user/default.target.wants/app-org.lizardbyte.sunshine@autostart.service; rm -f {home}/.config/systemd/user/graphical-session.target.wants/sunshine.service {home}/.config/systemd/user/graphical-session.target.wants/app-org.lizardbyte.sunshine@autostart.service; rm -f {home}/.config/systemd/user/xdg-desktop-autostart.target.wants/sunshine.service {home}/.config/systemd/user/xdg-desktop-autostart.target.wants/app-org.lizardbyte.sunshine@autostart.service; echo CLEANUP_USER_OK'",
+            user = target_user,
+            home = target_home,
+        );
+        let reload_and_verify_command = format!(
+            "sudo -u {user} env XDG_RUNTIME_DIR=/run/user/{uid} systemctl --user daemon-reload 2>/dev/null || true; sleep 2; if pgrep -x sunshine >/dev/null 2>&1; then echo CLEANUP_VERIFY_FAIL; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; exit 1; fi; if [ -e {home}/.config/systemd/user/xdg-desktop-autostart.target.wants/sunshine.service ]; then echo CLEANUP_VERIFY_FAIL; echo '--- user symlink still present ---'; ls -la {home}/.config/systemd/user/xdg-desktop-autostart.target.wants 2>/dev/null || true; exit 1; fi; echo CLEANUP_VERIFY_OK",
+            user = target_user,
+            uid = target_uid,
+            home = target_home,
+        );
+
+        let system_cleanup = {
+            let remote = remote.clone();
+            let command = system_cleanup_command.to_string();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if system_cleanup.status_code != 0 || !system_cleanup.stdout.contains("CLEANUP_SYSTEM_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Failed system Sunshine cleanup. stdout: {} | stderr: {}",
+                system_cleanup.stdout.trim(),
+                system_cleanup.stderr.trim()
+            )));
+        }
+
+        let user_cleanup = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&user_cleanup_command, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if user_cleanup.status_code != 0 || !user_cleanup.stdout.contains("CLEANUP_USER_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Failed user Sunshine cleanup. stdout: {} | stderr: {}",
+                user_cleanup.stdout.trim(),
+                user_cleanup.stderr.trim()
+            )));
+        }
+
+        let reload_and_verify = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&reload_and_verify_command, Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+        if reload_and_verify.status_code != 0
+            || !reload_and_verify.stdout.contains("CLEANUP_VERIFY_OK")
+        {
+            return Err(AppError::Provisioning(format!(
+                "Failed Sunshine cleanup verification. stdout: {} | stderr: {}",
+                reload_and_verify.stdout.trim(),
+                reload_and_verify.stderr.trim()
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn assert_rtsp_port_available(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+        target_home: &str,
+    ) -> AppResult<()> {
+        let port_check_command = format!(
+            "if ss -ltnp | grep -q ':48010 '; then echo 'PORT_BUSY'; echo '--- ss ---'; ss -ltnp | grep 48010 || true; echo '--- ps ---'; ps -ef | grep '[s]unshine' || true; echo '--- systemd ---'; systemctl status sunshine --no-pager 2>/dev/null || true; echo '--- user symlinks ---'; ls -la {home}/.config/systemd/user/xdg-desktop-autostart.target.wants 2>/dev/null || true; else echo 'PORT_FREE'; fi",
+            home = target_home,
+        );
+
+        let port_check = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(&port_check_command, Duration::from_secs(20))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if port_check.status_code != 0 || !port_check.stdout.contains("PORT_FREE") {
+            return Err(AppError::Provisioning(format!(
+                "RTSP port 48010 is still occupied before starting Sunshine for user {}. {}",
+                target_user,
+                port_check.stdout.trim()
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn setup_realtime_permissions(&self, remote: &RemoteExec) -> AppResult<()> {
+        let limits_config = r#"# Realtime audio permissions for low-latency streaming
+# Generated by Noland Connect
+
+@audio - rtprio 99
+@audio - priority -19
+@audio - memlock unlimited
+@audio - nice -19
+"#;
+
+        let escaped = shell_single_quote_escape(limits_config);
+        let command = format!(
+            "sudo bash -lc 'cat > /etc/security/limits.d/99-realtime-audio.conf <<\"EOF\"\n{}\nEOF'",
+            escaped
+        );
+
+        let output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if output.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed to configure realtime permissions: {}",
+                output.stderr
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn setup_virtual_input_permissions(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<()> {
+        let command = format!(
+            r#"set -euo pipefail
+TARGET_USER="{target_user}"
+
+sudo modprobe uinput || true
+echo uinput | sudo tee /etc/modules-load.d/uinput.conf >/dev/null
+sudo tee /etc/udev/rules.d/99-uinput.rules >/dev/null <<'EOF'
+KERNEL==\"uinput\", MODE=\"0660\", GROUP=\"input\", OPTIONS+=\"static_node=uinput\"
+EOF
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+sudo chgrp input /dev/uinput 2>/dev/null || true
+sudo chmod 660 /dev/uinput 2>/dev/null || true
+sudo usermod -aG input "$TARGET_USER" || true
+
+if command -v setfacl >/dev/null 2>&1; then
+  sudo setfacl -m u:$TARGET_USER:rw /dev/uinput 2>/dev/null || true
+fi
+"#,
+            target_user = target_user
+        );
+
+        let output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(60)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if output.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed to configure virtual input device permissions: {}",
+                output.stderr.trim()
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn setup_pipewire_config(&self, remote: &RemoteExec, target_user: &str) -> AppResult<()> {
+        let target_home = self.resolve_user_home(remote, target_user).await?;
+        let pipewire_lowlatency = r#"# Low-latency PipeWire configuration
+# Generated by Noland Connect
+
+context.properties = {
+    default.clock.rate = 48000,
+    default.clock.quantum = 256,
+    default.clock.min-quantum = 128,
+    default.clock.max-quantum = 1024,
+    default.clock.quantum-limit = 8192,
+}
+"#;
+
+        let command = if target_user == "root" {
+            format!(
+                "mkdir -p {home}/.config/pipewire/pipewire.conf.d && tee {home}/.config/pipewire/pipewire.conf.d/10-low-latency.conf > /dev/null <<'EOF'\n{config}\nEOF",
+                home = target_home,
+                config = pipewire_lowlatency
+            )
+        } else {
+            format!(
+                "sudo -u {user} mkdir -p {home}/.config/pipewire/pipewire.conf.d && sudo -u {user} tee {home}/.config/pipewire/pipewire.conf.d/10-low-latency.conf > /dev/null <<'EOF'\n{config}\nEOF",
+                home = target_home,
+                config = pipewire_lowlatency,
+                user = target_user
+            )
+        };
+
+        let output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(60)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if output.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Failed to configure PipeWire (exit {}): stdout: {} | stderr: {}",
+                output.status_code,
+                output.stdout.trim(),
+                output.stderr.trim()
+            )));
+        }
+
+        Ok(())
+    }
+
+    async fn detect_capture_backend(&self, remote: &RemoteExec) -> AppResult<String> {
+        info!(
+            "Xorg-only Sunshine host policy enabled; skipping Wayland/XDG portal capture backends"
+        );
+        // Check if Xorg is running first (required for NVFBC)
+        let xorg_check = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh("pgrep -x Xorg >/dev/null 2>&1 && DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --listmonitors 2>/dev/null && echo yes || echo no", Duration::from_secs(30))
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        // Check if this is NVIDIA GPU (NVFBC only works on NVIDIA)
+        let nvidia_check = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "nvidia-smi --query-gpu=name --format=csv,noheader 2>/dev/null | head -1",
+                    Duration::from_secs(15),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        let is_nvidia = nvidia_check.status_code == 0 && !nvidia_check.stdout.trim().is_empty();
+
+        // NVFBC: Use immediately if NVIDIA GPU is present
+        if is_nvidia {
+            info!("NVIDIA GPU detected, using capture backend: nvfbc");
+            return Ok("nvfbc".to_string());
+        }
+
+        // KMS: Requires DRM device
+        let kms_check = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "ls -la /dev/dri/renderD* 2>/dev/null | head -2 || true",
+                    Duration::from_secs(15),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if kms_check.status_code == 0 && !kms_check.stdout.trim().is_empty() {
+            info!("KMS available, using capture backend: kms");
+            return Ok("kms".to_string());
+        }
+
+        // X11 fallback
+        if xorg_check.status_code == 0 && xorg_check.stdout.trim() == "yes" {
+            info!("X11 available, using capture backend: x11");
+            return Ok("x11".to_string());
+        }
+
+        info!("No capture backend detected, falling back to: x11");
+        Ok("x11".to_string())
+    }
+
+    async fn detect_output_name(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+    ) -> AppResult<String> {
+        let target_home = self.resolve_user_home(remote, target_user).await?;
+        let command = format!(
+            r#"XAUTH=/etc/X11/.Xauthority-noland; if [ ! -s "$XAUTH" ]; then XAUTH={target_home}/.Xauthority; fi; DISPLAY=:0 XAUTHORITY="$XAUTH" xrandr --query 2>/dev/null | sed -n 's/^\([^[:space:]]*\)[[:space:]]\+connected.*/\1/p' | sed -n '1p'"#,
+            target_home = target_home,
+        );
+        let output = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(30)))
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        let output_name = output.stdout.trim();
+        if output.status_code != 0 || output_name.is_empty() {
+            return Err(AppError::Provisioning(format!(
+                "Could not detect the active RandR output for Sunshine. stdout: {} | stderr: {}",
+                output.stdout.trim(),
+                output.stderr.trim()
+            )));
+        }
+        if !output_name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        }) {
+            return Err(AppError::Provisioning(format!(
+                "Detected an invalid RandR output name: {output_name}"
+            )));
+        }
+
+        info!("Detected active RandR output: {}", output_name);
+        Ok(output_name.to_string())
+    }
+
+    pub async fn validate(
+        &self,
+        remote: &RemoteExec,
+        target_user: &str,
+        display: DisplayProfile,
+    ) -> AppResult<()> {
+        let target_home = self.resolve_user_home(remote, target_user).await?;
+
+        // Check Sunshine is running as the correct user
+        let process_check = {
+            let remote = remote.clone();
+            let target_user = target_user.to_string();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!("pgrep -u {target_user} -x sunshine >/dev/null 2>&1 && echo 'RUNNING_AS_USER' || (pgrep -x sunshine >/dev/null 2>&1 && echo 'RUNNING_AS_ROOT' || echo 'NOT_RUNNING')"),
+                    Duration::from_secs(10),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if process_check.status_code != 0 || process_check.stdout.contains("NOT_RUNNING") {
+            let ps_output = {
+                let remote = remote.clone();
+                tokio::task::spawn_blocking(move || {
+                    remote.ssh(
+                        "ps aux | grep -i sunshine | grep -v grep || true",
+                        Duration::from_secs(10),
+                    )
+                })
+                .await
+                .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+            };
+            return Err(AppError::Provisioning(format!(
+                "Sunshine validation failed (process not running). pgrep stdout: {} | stderr: {} | ps: {}",
+                process_check.stdout.trim(),
+                process_check.stderr.trim(),
+                ps_output.stdout.trim()
+            )));
+        }
+
+        if process_check.stdout.contains("RUNNING_AS_ROOT") {
+            return Err(AppError::Provisioning(
+                "Sunshine is running as root instead of the target user. This is a security risk and will break display/audio capture. Please re-provision.".to_string(),
+            ));
+        }
+
+        // Check config file exists
+        let config_check = {
+            let remote = remote.clone();
+            let target_home = target_home.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!("test -f {target_home}/.config/sunshine/sunshine.conf && grep -q 'port =' {target_home}/.config/sunshine/sunshine.conf && echo 'CONFIG_OK' || echo 'CONFIG_BAD'"),
+                    Duration::from_secs(10),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if config_check.status_code != 0 || !config_check.stdout.contains("CONFIG_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Sunshine config validation failed. stdout: {} | stderr: {}",
+                config_check.stdout.trim(),
+                config_check.stderr.trim()
+            )));
+        }
+
+        // Check display
+        let display_debug = {
+            let remote = remote.clone();
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    "DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --listmonitors",
+                    Duration::from_secs(40),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if display_debug.status_code != 0 || !display_debug.stdout.contains("Monitors:") {
+            warn!(
+                "Display probe did not return monitor list; continuing because Sunshine is running. stdout: {} | stderr: {}",
+                display_debug.stdout.trim(),
+                display_debug.stderr.trim()
+            );
+        } else {
+            info!("Sunshine display check: {}", display_debug.stdout.trim());
+        }
+
+        // Check display mode
+        let display_mode_check = {
+            let remote = remote.clone();
+            let expected = format!("{}x{}", display.width, display.height);
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!("DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --query | grep -Eq '^[[:space:]]+{expected}[[:space:]].*\\*' && echo ok || (DISPLAY=:0 XAUTHORITY=/etc/X11/.Xauthority-noland xrandr --query && exit 1)"),
+                    Duration::from_secs(40),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if display_mode_check.status_code != 0 {
+            return Err(AppError::Provisioning(format!(
+                "Sunshine display mode validation failed. Expected {}x{}, but current mode did not match. Output: {} | stderr: {}",
+                display.width,
+                display.height,
+                display_mode_check.stdout.trim(),
+                display_mode_check.stderr.trim()
+            )));
+        }
+
+        // Check web UI responds
+        let web_check = {
+            let remote = remote.clone();
+            let web_probe_targets = if self.defaults.bind_address.trim().is_empty() {
+                "https://localhost:47990/pin https://127.0.0.1:47990/pin".to_string()
+            } else {
+                format!(
+                    "https://localhost:47990/pin https://127.0.0.1:47990/pin https://{}:47990/pin",
+                    self.defaults.bind_address
+                )
+            };
+            tokio::task::spawn_blocking(move || {
+                remote.ssh(
+                    &format!(
+                        "WEB_OK=0; for url in {web_probe_targets}; do if curl -k -s --connect-timeout 5 \"$url\" >/dev/null 2>&1; then WEB_OK=1; break; fi; done; if [ \"$WEB_OK\" = \"1\" ]; then echo 'WEB_OK'; else echo 'WEB_FAIL'; fi"
+                    ),
+                    Duration::from_secs(15),
+                )
+            })
+            .await
+            .map_err(|error| AppError::Command(format!("join failure: {error}")))??
+        };
+
+        if web_check.status_code != 0 || !web_check.stdout.contains("WEB_OK") {
+            return Err(AppError::Provisioning(format!(
+                "Sunshine web UI validation failed (not responding on expected HTTPS probe targets). stdout: {} | stderr: {}",
+                web_check.stdout.trim(),
+                web_check.stderr.trim()
+            )));
+        }
+
+        Ok(())
+    }
+}
+
+fn shell_single_quote_escape(content: &str) -> String {
+    content.replace('\'', "'\"'\"'")
+}

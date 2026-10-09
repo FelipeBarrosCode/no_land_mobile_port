@@ -1,0 +1,175 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Noland Connect",
+  "version": "0.1.17",
+  "identifier": "com.noland.connect",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Noland Connect",
+        "width": 1400,
+        "height": 920,
+        "minWidth": 1100,
+        "minHeight": 740,
+        "resizable": true,
+        "fullscreen": false
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "createUpdaterArtifacts": true,
+    "publisher": "No Land - Felipe Barros Moura",
+    "homepage": "https://no-land.net",
+    "copyright": "Copyright © 2026 No Land and Felipe Barros Moura",
+    "license": "GPL-3.0-only",
+    "category": "Utility",
+    "shortDescription": "Connect to and manage remote Linux workstations",
+    "longDescription": "Noland Connect manages remote Linux workstations.\nIt provides remote applications, networking, and backup workflows.",
+    "targets": "all",
+    "externalBin": [
+      "binaries/noland-net-helper",
+      "binaries/noland-mic-sender"
+    ],
+    "resources": [
+      "binaries/ssh-*",
+      "binaries/scp-*",
+      "binaries/ssh-keygen-*",
+      "binaries/ssh-runtime/**/*",
+      "../vm-cloud-mic-agent/Cargo.toml",
+      "../vm-cloud-mic-agent/src/**/*",
+      "../network-agent/Cargo.toml",
+      "../network-agent/Cargo.lock",
+      "../network-agent/src/**/*",
+      "../network-contracts/Cargo.toml",
+      "../network-contracts/Cargo.lock",
+      "../network-contracts/src/**/*",
+      "../state-agent/Cargo.toml",
+      "../state-agent/Cargo.lock",
+      "../state-agent/rust-toolchain.toml",
+      "../state-agent/crates/**/*",
+      "../state-agent/scripts/**/*",
+      "../state-agent/systemd/**/*"
+    ],
+    "linux": {
+      "deb": {
+        "files": {
+          "/usr/share/metainfo/com.noland.connect.metainfo.xml": "packaging/com.noland.connect.metainfo.xml",
+          "/usr/share/doc/noland-connect/copyright": "packaging/copyright"
+        },
+        "section": "net",
+        "changelog": "packaging/changelog",
+        "depends": [
+          "libc6",
+          "openssh-client",
+          "iproute2",
+          "xdg-utils",
+          "procps",
+          "libwebkit2gtk-4.1-0",
+          "libgtk-3-0",
+          "libayatana-appindicator3-1",
+          "librsvg2-2",
+          "libglib2.0-0",
+          "libasound2",
+          "libpulse0",
+          "libpipewire-0.3-0",
+          "libgstreamer1.0-0",
+          "gstreamer1.0-plugins-base",
+          "gstreamer1.0-plugins-good",
+          "gstreamer1.0-plugins-bad",
+          "gstreamer1.0-gl",
+          "gstreamer1.0-libav",
+          "gstreamer1.0-pipewire",
+          "gstreamer1.0-x",
+          "libudev1",
+          "libgudev-1.0-0",
+          "libva2",
+          "libva-drm2",
+          "libva-x11-2",
+          "libvdpau1",
+          "libdrm2",
+          "libegl1",
+          "libgl1",
+          "libgles2",
+          "libgnutls30",
+          "libx11-6",
+          "libxext6",
+          "libxfixes3",
+          "libxdamage1",
+          "libxrandr2",
+          "libxcursor1",
+          "libxi6",
+          "libxinerama1",
+          "libxcb1",
+          "libxkbcommon0",
+          "libxkbcommon-x11-0",
+          "libxshmfence1",
+          "libwayland-client0",
+          "libwayland-cursor0",
+          "libwayland-egl1",
+          "libdecor-0-0"
+        ]
+      }
+    },
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "windows/nsis-hooks.nsh"
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0",
+      "frameworks": [
+        "bundled/macos/GStreamer.framework"
+      ],
+      "dmg": {
+        "background": "icons/dmg-background.png",
+        "windowPosition": {
+          "x": 200,
+          "y": 120
+        },
+        "windowSize": {
+          "width": 660,
+          "height": 400
+        },
+        "appPosition": {
+          "x": 150,
+          "y": 165
+        },
+        "applicationFolderPosition": {
+          "x": 470,
+          "y": 165
+        }
+      }
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/64x64.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaW5pIHB1YmxpYyBrZXk6IDRGQ0Q4QUYyRTczQjVCQTgKUldTb1d6dm44b3JOVDdoVXYrblJqaGFpZWFCdmM4dERWb3N3cHRlYTBoYjNYUWJwYXAwN2F1QjcK",
+      "endpoints": [
+        "https://github.com/FelipeBarrosCode/no_land/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

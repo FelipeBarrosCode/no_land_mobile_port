@@ -1,0 +1,271 @@
+#include "noland_video_renderer.h"
+#include "Limelight.h"
+
+#include <string.h>
+
+static void nl_video_renderer_platform_attach_surface_noop(nl_video_renderer_t* renderer, const nl_surface_descriptor_t* surface) {
+  (void)renderer;
+  (void)surface;
+}
+
+static void nl_video_renderer_platform_detach_surface_noop(nl_video_renderer_t* renderer) {
+  (void)renderer;
+}
+
+static int nl_video_renderer_platform_setup_noop(nl_video_renderer_t* renderer, int video_format, int width, int height, int redraw_rate) {
+  (void)renderer;
+  (void)video_format;
+  (void)width;
+  (void)height;
+  (void)redraw_rate;
+  return 0;
+}
+
+static void nl_video_renderer_platform_start_noop(nl_video_renderer_t* renderer) {
+  (void)renderer;
+}
+
+static void nl_video_renderer_platform_stop_noop(nl_video_renderer_t* renderer) {
+  (void)renderer;
+}
+
+static void nl_video_renderer_platform_cleanup_noop(nl_video_renderer_t* renderer) {
+  (void)renderer;
+}
+
+static int nl_video_renderer_platform_submit_frame_noop(nl_video_renderer_t* renderer, const void* decode_unit, const nl_video_frame_metadata_t* frame) {
+  (void)renderer;
+  (void)decode_unit;
+  (void)frame;
+  return DR_OK;
+}
+
+#if !defined(__linux__)
+void nl_video_renderer_platform_set_overlay_text(nl_video_renderer_t* renderer, const char* text) {
+  (void)renderer;
+  (void)text;
+}
+#endif
+
+#if !defined(__APPLE__) && !defined(__linux__) && !defined(_WIN32)
+void nl_video_renderer_platform_attach_surface(nl_video_renderer_t* renderer, const nl_surface_descriptor_t* surface) {
+  nl_video_renderer_platform_attach_surface_noop(renderer, surface);
+}
+
+void nl_video_renderer_platform_detach_surface(nl_video_renderer_t* renderer) {
+  nl_video_renderer_platform_detach_surface_noop(renderer);
+}
+
+int nl_video_renderer_platform_setup(nl_video_renderer_t* renderer, int video_format, int width, int height, int redraw_rate) {
+  return nl_video_renderer_platform_setup_noop(renderer, video_format, width, height, redraw_rate);
+}
+
+void nl_video_renderer_platform_start(nl_video_renderer_t* renderer) {
+  nl_video_renderer_platform_start_noop(renderer);
+}
+
+void nl_video_renderer_platform_stop(nl_video_renderer_t* renderer) {
+  nl_video_renderer_platform_stop_noop(renderer);
+}
+
+void nl_video_renderer_platform_cleanup(nl_video_renderer_t* renderer) {
+  nl_video_renderer_platform_cleanup_noop(renderer);
+}
+
+int nl_video_renderer_platform_submit_frame(nl_video_renderer_t* renderer, const void* decode_unit, const nl_video_frame_metadata_t* frame) {
+  return nl_video_renderer_platform_submit_frame_noop(renderer, decode_unit, frame);
+}
+#endif
+
+void nl_video_renderer_init(nl_video_renderer_t* renderer) {
+  if (renderer == NULL) {
+    return;
+  }
+  memset(renderer, 0, sizeof(*renderer));
+  (void)nl_latency_telemetry_init(&renderer->telemetry);
+}
+
+void nl_video_renderer_destroy(nl_video_renderer_t* renderer) {
+  if (renderer == NULL) {
+    return;
+  }
+  nl_video_renderer_platform_cleanup(renderer);
+  nl_latency_telemetry_cleanup(&renderer->telemetry);
+  memset(renderer, 0, sizeof(*renderer));
+}
+
+void nl_video_renderer_set_latency_config(nl_video_renderer_t* renderer, const nl_latency_config_t* config, uint32_t client_refresh_rate_x100) {
+  if (renderer == NULL) {
+    return;
+  }
+  memset(&renderer->latency_config, 0, sizeof(renderer->latency_config));
+  if (config != NULL) {
+    renderer->latency_config = *config;
+  }
+  if (renderer->latency_config.frame_buffer_mode > NL_FRAME_BUFFER_MODE_THREE_FRAMES) {
+    renderer->latency_config.frame_buffer_mode = NL_FRAME_BUFFER_MODE_THREE_FRAMES;
+  }
+  if (renderer->latency_config.frame_buffer_mode != NL_FRAME_BUFFER_MODE_OFF) {
+    renderer->latency_config.adaptive_late_frame_drop_enabled = 0U;
+  }
+  if (renderer->latency_config.vsync_enabled == 0U) {
+    renderer->latency_config.pacing_mode = NL_PACING_MODE_OFF;
+  }
+  renderer->client_refresh_rate_x100 = client_refresh_rate_x100;
+  nl_latency_telemetry_set_pacing(
+      &renderer->telemetry,
+      renderer->latency_config.pacing_mode,
+      NL_PACING_MODE_OFF);
+}
+
+void nl_video_renderer_set_frame_processor(nl_video_renderer_t* renderer, nl_video_frame_callback processor, void* user_data) {
+  if (renderer == NULL) {
+    return;
+  }
+  renderer->frame_processor = processor;
+  renderer->frame_processor_user_data = user_data;
+}
+
+void nl_video_renderer_set_overlay_text(nl_video_renderer_t* renderer, const char* text) {
+  if (renderer == NULL) {
+    return;
+  }
+  nl_video_renderer_platform_set_overlay_text(renderer, text);
+}
+
+void nl_video_renderer_attach_surface(nl_video_renderer_t* renderer, const nl_surface_descriptor_t* surface) {
+  if (renderer == NULL) {
+    return;
+  }
+  if (surface != NULL) {
+    renderer->surface = *surface;
+    renderer->surface_attached = true;
+    nl_video_renderer_platform_attach_surface(renderer, surface);
+  }
+}
+
+void nl_video_renderer_detach_surface(nl_video_renderer_t* renderer) {
+  if (renderer == NULL) {
+    return;
+  }
+  nl_video_renderer_platform_detach_surface(renderer);
+  memset(&renderer->surface, 0, sizeof(renderer->surface));
+  renderer->surface_attached = false;
+}
+
+int nl_video_renderer_setup(nl_video_renderer_t* renderer, int video_format, int width, int height, int redraw_rate) {
+  int result;
+  if (renderer == NULL) {
+    return -1;
+  }
+  renderer->configured = false;
+  renderer->video_format = video_format;
+  renderer->width = width;
+  renderer->height = height;
+  renderer->redraw_rate = redraw_rate;
+  nl_latency_telemetry_reset(
+      &renderer->telemetry,
+      renderer->latency_config.telemetry_enabled != 0U,
+      redraw_rate > 0 ? (uint32_t)redraw_rate : 0U,
+      renderer->latency_config.late_frame_tolerance_us,
+      (uint8_t)renderer->latency_config.frame_buffer_mode);
+  nl_latency_telemetry_set_pacing(
+      &renderer->telemetry,
+      renderer->latency_config.pacing_mode,
+      NL_PACING_MODE_OFF);
+  result = nl_video_renderer_platform_setup(renderer, video_format, width, height, redraw_rate);
+  renderer->configured = result == 0;
+  return result;
+}
+
+void nl_video_renderer_start(nl_video_renderer_t* renderer) {
+  if (renderer == NULL) {
+    return;
+  }
+  renderer->started = true;
+  nl_video_renderer_platform_start(renderer);
+}
+
+void nl_video_renderer_stop(nl_video_renderer_t* renderer) {
+  if (renderer == NULL) {
+    return;
+  }
+  renderer->started = false;
+  nl_video_renderer_platform_stop(renderer);
+}
+
+void nl_video_renderer_cleanup(nl_video_renderer_t* renderer) {
+  bool preserve_surface_attached;
+  nl_surface_descriptor_t preserved_surface;
+
+  if (renderer == NULL) {
+    return;
+  }
+
+  preserved_surface = renderer->surface;
+  preserve_surface_attached = renderer->surface_attached;
+  nl_video_renderer_platform_cleanup(renderer);
+  renderer->configured = false;
+  renderer->started = false;
+  renderer->video_format = 0;
+  renderer->width = 0;
+  renderer->height = 0;
+  renderer->redraw_rate = 0;
+  memset(&renderer->last_frame, 0, sizeof(renderer->last_frame));
+  renderer->platform_context = NULL;
+  renderer->frame_processor = NULL;
+  renderer->frame_processor_user_data = NULL;
+  nl_latency_telemetry_reset(
+      &renderer->telemetry,
+      renderer->latency_config.telemetry_enabled != 0U,
+      0U,
+      renderer->latency_config.late_frame_tolerance_us,
+      (uint8_t)renderer->latency_config.frame_buffer_mode);
+  if (preserve_surface_attached) {
+    renderer->surface = preserved_surface;
+    renderer->surface_attached = true;
+  } else {
+    memset(&renderer->surface, 0, sizeof(renderer->surface));
+    renderer->surface_attached = false;
+  }
+}
+
+int nl_video_renderer_submit_frame(nl_video_renderer_t* renderer, const void* decode_unit, const nl_video_frame_metadata_t* frame) {
+  int result;
+
+  if (renderer == NULL || frame == NULL) {
+    return -1;
+  }
+
+  if (!nl_video_renderer_is_ready(renderer)) {
+    renderer->dropped_frame_count += 1U;
+    nl_latency_telemetry_record_drop(
+        &renderer->telemetry,
+        frame->presentation_time_us,
+        0U,
+        NL_FRAME_DROP_RENDERER_ERROR);
+    return DR_OK;
+  }
+
+  renderer->last_frame = *frame;
+  result = nl_video_renderer_platform_submit_frame(renderer, decode_unit, frame);
+  if (result != DR_OK) {
+    renderer->dropped_frame_count += 1U;
+    nl_latency_telemetry_record_drop(
+        &renderer->telemetry,
+        frame->presentation_time_us,
+        0U,
+        NL_FRAME_DROP_DECODER_FAILURE);
+    return result;
+  }
+  renderer->submitted_frame_count += 1U;
+  return DR_OK;
+}
+
+bool nl_video_renderer_is_ready(const nl_video_renderer_t* renderer) {
+  return renderer != NULL && renderer->configured && renderer->started && renderer->surface_attached;
+}
+
+bool nl_video_renderer_is_session_active(const nl_video_renderer_t* renderer) {
+  return renderer != NULL && renderer->configured && renderer->started;
+}

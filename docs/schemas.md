@@ -1,0 +1,143 @@
+# Schemas and Data Contracts
+
+This document summarizes the core schemas that define app behavior.
+
+## 1) Persisted application state
+
+Source: `src-tauri/src/models/app_state.rs` (`PersistedAppState`)
+
+Top-level fields:
+
+- `version`
+- `onboardingCompleted`
+- `credentials`
+- `ssh`
+- `location`
+- `serverPreferences`
+- `selectedOffer`
+- `instance`
+- `wireguard`
+- `sunshine`
+- `moonlight`
+- `moonlightPreferences`
+- `sharedStorage`
+- `provisionedServers`
+- `postWireguardSetup`
+- `orchestrationState`
+- `lastError`
+
+Storage file path is managed by `JsonStateStore` and defaults to app data `state.json`.
+
+Notable nested sections:
+
+- `instance.sshCommand`: prebuilt SSH command string for manual reuse
+- `wireguard.*Fingerprint` and `wireguard.endpoint*`: persisted key metadata and endpoint details
+- `sunshine.headlessEdidBase64`, `sunshine.edidMode`, `sunshine.edidRefreshRateHz`, `sunshine.edidSourceLabel`
+- `sharedStorage.settings.cryptPassword`: stored in persisted state but not returned by the frontend-safe response shape
+
+## 2) Orchestration state machine
+
+Enum: `OrchestrationState`
+
+Main values:
+
+- setup/provisioning: `Onboarding`, `SelectingServer`, `ServerSelected`, `GeneratingSshKey`, `UploadingSshKeyToVast`, `CreatingInstance`, `WaitingForInstance`, `VerifyingReservation`, `ConnectingSsh`, `ConfiguringRemote`, `ConfiguringNvidiaHeadless`, `ConfiguringSunshine`, `ConfiguringWireGuard`, `ConfiguringMoonlight`
+- post-WireGuard guided flow: `WireGuardConfigGenerated`, `WireGuardAppHandoffStarted`, `WireGuardWaitingForImport`, `WireGuardWaitingForActivation`, `WireGuardVerifying`, `WireGuardConnected`, `MoonlightSunshineReadyToSetup`, `SunshineCredentialsConfiguring`, `SunshineVerifying`, `MoonlightDetecting`, `MoonlightPairingStarted`, `MoonlightPinReceived`, `SunshinePinSubmitting`, `MoonlightSunshinePaired`
+- pairing/resume states: `AwaitingPairPin`, `Pairing`
+- terminal-ish: `Idle`, `Ready`, `Error`
+
+## 3) Post-WireGuard setup schema
+
+Primary struct: `PostWireGuardSetupState`
+
+Important fields:
+
+- stage tracking: `stage`, `wireguardSetupStatus`, `wireguardSetupMode`
+- context: `currentInstanceId`, `wireguardExportPath`, `wireguardConfig`, `wireguardVerifiedHost`, `wireguardReachablePorts`
+- pairing flags: `moonlightInstalled`, `paired`, `setupComplete`
+- recoverable error channel: `lastError` (`SetupErrorState`)
+
+Enums:
+
+- `SetupStage`
+- `WireGuardSetupStatus`
+- `WireGuardSetupMode`
+
+## 4) Per-instance checkpoint schema
+
+`ProvisionedServerState` + `ProvisionedServerSteps`
+
+Tracks whether each provisioning checkpoint has completed for a given instance:
+
+- SSH key ready/uploaded
+- instance created/ready
+- SSH connected
+- NVIDIA headless configured
+- post-NVIDIA reboot completed
+- Sunshine configured
+- low-latency audio configured
+- WireGuard configured
+- Moonlight configured
+- awaiting pair pin
+- pairing completed
+- post-provision completed
+
+## 5) Provisioning event schema
+
+Source: `src-tauri/src/models/events.rs`
+
+`ProvisioningEvent` fields:
+
+- `state: OrchestrationState`
+- `message: string`
+- `details?: string`
+- `timestamp: DateTime<Utc>`
+- `isError: boolean`
+
+This is emitted to the frontend over `orchestration:progress`.
+
+## 6) Shared storage schemas
+
+Key types:
+
+- `SharedStorageState`
+- `SharedStorageSettings`
+- `SharedStorageSettingsUpdate`
+- `BackupStatusResponse`
+- `SharedStorageInstanceStatus`
+- `BundleIndex`, `AppBundle`, `FolderBundle`
+- `RestoreRequest`, `RestoreDryRunResult`, `RestoreJob`
+
+These cover backup configuration, bundle discovery, dry-run planning, and restore execution status.
+
+Important distinction:
+
+- `SharedStorageSettings` is the persisted secret-bearing shape
+- `SharedStorageSettingsResponse` is the frontend-safe shape that reports whether a crypt password is set without returning it
+
+## 7) Microphone passthrough schemas
+
+Key types:
+
+- `InstanceMicConfig`
+- `MicQualityProfile`
+- `InstanceMicRuntimeStatus`
+- `MicState`
+- `MicSettingsUpdate`
+- `MicSessionResponse`
+
+`ProvisionedServerState` persists `micForwardingEnabled`, `micAutoConnect`, the selected device, and quality profile. `InstanceMicConfig.enabled` describes the current runtime session, while `forwardingEnabled` and `autoConnect` describe saved behavior between streams.
+
+Session IDs, tokens, randomized RTP offsets, negotiated ports, and sidecar reconnect counts are runtime data. The media-session record remains in memory; stopping a session does not delete the persistent host PipeWire source.
+
+## 8) Frontend API type mirror
+
+Source: `src/lib/types.ts`
+
+The frontend mirrors backend schemas (camelCase) for command results and state hydration. Keep both files aligned when introducing schema changes.
+
+## 9) Backward compatibility guidance
+
+- Add new fields with serde defaults when possible.
+- Avoid removing or renaming persisted fields without migration logic.
+- Keep enum additions additive unless coordinated with frontend handling.

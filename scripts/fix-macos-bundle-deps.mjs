@@ -1,0 +1,875 @@
+#!/usr/bin/env node
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { tmpdir } from 'node:os';
+import { fileURLToPath } from 'node:url';
+import { spawnSync } from 'node:child_process';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const repoRoot = resolve(__dirname, '..');
+const target = process.argv[2] ?? process.env.NOLAND_MIC_SENDER_TARGET ?? 'aarch64-apple-darwin';
+const tauriConfig = JSON.parse(readFileSync(join(repoRoot, 'src-tauri', 'tauri.conf.json'), 'utf8'));
+const productName = tauriConfig.productName ?? 'Noland Connect';
+const version = tauriConfig.version ?? '0.1.0';
+const tripleTargetDir = join(repoRoot, 'src-tauri', 'target', target, 'release');
+const defaultTargetDir = join(repoRoot, 'src-tauri', 'target', 'release');
+const bundleAppRelativePath = join('bundle', 'macos', `${productName}.app`);
+const bundleDmgRelativePath = join('bundle', 'dmg', `${productName}_${version}_${target.includes('aarch64') ? 'aarch64' : 'x64'}.dmg`);
+const targetReleaseDir = chooseTargetReleaseDir();
+const appPath = join(targetReleaseDir, bundleAppRelativePath);
+const dmgPath = join(targetReleaseDir, bundleDmgRelativePath);
+
+if (process.platform !== 'darwin') {
+  console.log('Skipping macOS bundle dependency fix on non-macOS host');
+  process.exit(0);
+}
+
+if (!existsSync(appPath)) {
+  console.error(`App bundle not found: ${appPath}`);
+  process.exit(1);
+}
+
+const contentsDir = join(appPath, 'Contents');
+const infoPlistPath = join(contentsDir, 'Info.plist');
+const macosDir = join(contentsDir, 'MacOS');
+const frameworksDir = join(contentsDir, 'Frameworks');
+const resourcesDir = join(contentsDir, 'Resources');
+const resourcesBinariesDir = join(resourcesDir, 'binaries');
+const microphoneUsageDescription = 'Noland Connect needs microphone access to forward your local mic into your cloud gaming session.';
+const micSidecarEntitlements = join(repoRoot, 'mic-sidecar', 'noland-mic-sender.entitlements');
+const frameworkBundleSource = join(frameworksDir, 'GStreamer.framework');
+const frameworkBundleDir = join(resourcesDir, 'gstreamer', 'macos', 'GStreamer.framework');
+const bundledFrameworkBuildLibDir = toPosix(join(repoRoot, 'src-tauri', 'bundled', 'macos', 'GStreamer.framework', 'Versions', 'Current', 'lib'));
+const nativePrefix = (() => {
+  const explicit = process.env.NOLAND_NATIVE_DEPS_PREFIX?.trim();
+  if (explicit) return resolve(explicit);
+  // Fall back to the checked-in native deps directory for the current target.
+  // This ensures @rpath dylibs (libopus, libSDL2, libcrypto, ...) are always
+  // staged into Contents/Frameworks/ without requiring the env var to be set.
+  const local = join(repoRoot, 'src-tauri', '.native-deps', target);
+  if (existsSync(local)) {
+    console.log(`[fix-macos-bundle-deps] Using local native deps prefix: ${local}`);
+    return local;
+  }
+  return null;
+})();
+
+if (existsSync(frameworkBundleSource) && !existsSync(frameworkBundleDir)) {
+  mkdirSync(dirname(frameworkBundleDir), { recursive: true });
+  renameSync(frameworkBundleSource, frameworkBundleDir);
+}
+
+const frameworkRoot = join(frameworkBundleDir, 'Versions', 'Current');
+const frameworkBinDir = join(frameworkRoot, 'bin');
+const frameworkLibDir = join(frameworkRoot, 'lib');
+const frameworkLibexecDir = join(frameworkRoot, 'libexec');
+const frameworkPluginDir = join(frameworkLibDir, 'gstreamer-1.0');
+const frameworkPluginValidateDir = join(frameworkPluginDir, 'validate');
+const frameworkShareValidateDir = join(frameworkRoot, 'share', 'gstreamer-1.0', 'validate');
+const allowedGStreamerPlugins = new Set([
+  'libgstcoreelements.dylib',
+  'libgstapp.dylib',
+  'libgstaudioconvert.dylib',
+  'libgstaudioresample.dylib',
+  'libgstaudiorate.dylib',
+  'libgstosxaudio.dylib',
+  'libgstopus.dylib',
+  'libgstrtp.dylib',
+  'libgstrtpmanager.dylib',
+  'libgstudp.dylib',
+  'libgsttypefindfunctions.dylib',
+  'libgstvolume.dylib',
+  'libgstwebrtcdsp.dylib',
+]);
+
+if (existsSync(frameworkBinDir)) {
+  console.log(`[fix-macos-bundle-deps] Removing unused GStreamer command-line tools from ${frameworkBinDir}`);
+  rmSync(frameworkBinDir, { recursive: true, force: true });
+}
+if (existsSync(frameworkPluginValidateDir)) {
+  rmSync(frameworkPluginValidateDir, { recursive: true, force: true });
+}
+if (existsSync(frameworkShareValidateDir)) {
+  rmSync(frameworkShareValidateDir, { recursive: true, force: true });
+}
+if (existsSync(frameworkPluginDir)) {
+  for (const entry of readdirSync(frameworkPluginDir, { withFileTypes: true })) {
+    const full = join(frameworkPluginDir, entry.name);
+    if (entry.isDirectory()) {
+      rmSync(full, { recursive: true, force: true });
+      continue;
+    }
+    if (!allowedGStreamerPlugins.has(entry.name)) {
+      rmSync(full, { recursive: true, force: true });
+    }
+  }
+}
+
+const appleSigningIdentity = process.env.APPLE_SIGNING_IDENTITY?.trim() || '';
+console.log(`[fix-macos-bundle-deps] Preparing macOS bundle fix for ${target}`);
+console.log(`[fix-macos-bundle-deps] App bundle: ${appPath}`);
+console.log(`[fix-macos-bundle-deps] Signing identity: ${appleSigningIdentity || 'ad-hoc'}`);
+
+const frameworkRootLibs = existsSync(frameworksDir)
+  ? readdirSync(frameworksDir, { withFileTypes: true })
+      .filter((entry) => entry.isFile())
+      .map((entry) => join(frameworksDir, entry.name))
+      .filter(isMachOCandidate)
+  : [];
+
+ensureBundledSdl3(frameworksDir, frameworkRootLibs);
+pruneIrrelevantMacResourceSidecars(resourcesBinariesDir, target);
+ensureMicrophoneUsageDescription(infoPlistPath, microphoneUsageDescription);
+sanitizeBundleSymlinks(appPath);
+
+const frameworkFiles = existsSync(frameworkLibDir) ? listFiles(frameworkLibDir).filter(isMachOCandidate) : [];
+const libexecFiles = existsSync(frameworkLibexecDir) ? listFiles(frameworkLibexecDir).filter(isMachOCandidate) : [];
+const macosFiles = listFiles(macosDir).filter(isCodeSignableFile);
+const resourceBinaryFiles = existsSync(resourcesBinariesDir)
+  ? listFiles(resourcesBinariesDir).filter(isCodeSignableFile)
+  : [];
+const explicitMacSidecarFiles = collectExplicitMacSidecarFiles(macosDir, resourcesBinariesDir, target);
+
+const frameworkIndex = new Map();
+for (const file of frameworkFiles) {
+  const rel = relative(frameworkLibDir, file);
+  frameworkIndex.set(rel, file);
+  frameworkIndex.set(basename(file), file);
+}
+
+const frameworkRootIndex = new Map();
+for (const file of frameworkRootLibs) {
+  frameworkRootIndex.set(basename(file), file);
+}
+
+const scanned = new Set();
+const allTargets = new Set([...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...macosFiles]);
+const externalLibs = new Map();
+
+for (const file of [...allTargets]) {
+  patchFile(file);
+}
+for (const file of [...allTargets]) {
+  rewriteRemainingGStreamerDeps(file);
+}
+for (const file of [...allTargets]) {
+  rewriteBuildTreeGStreamerDeps(file);
+}
+// Rewrite stale @loader_path deps that escape the framework and reference
+// the old Contents/Frameworks/ layout (e.g. @loader_path/../../../../../../../../Frameworks/libopus.0.dylib).
+// These are GStreamer plugins built with GStreamer.framework in Contents/Frameworks/
+// but now relocated to Contents/Resources/gstreamer/macos/GStreamer.framework/.
+for (const file of [...allTargets]) {
+  rewriteStaleLoaderPathFrameworkDeps(file);
+}
+
+for (const file of frameworkFiles) {
+  setInstallId(file, frameworkIdFor(file));
+}
+for (const file of externalLibs.values()) {
+  setInstallId(file, `@rpath/${basename(file)}`);
+}
+for (const file of frameworkRootLibs) {
+  setInstallId(file, `@rpath/${basename(file)}`);
+}
+
+// SIP strips DYLD_FRAMEWORK_PATH and DYLD_FALLBACK_LIBRARY_PATH from child
+// processes of signed app bundles, so the mic sidecar cannot find GStreamer
+// dylibs at runtime even though the parent process sets those vars.
+// Inject LC_RPATH entries directly into the sidecar binary so dyld resolves
+// @rpath/libgstreamer-1.0.0.dylib etc. without any env-var assistance.
+injectMicSidecarGStreamerRpath(macosDir, frameworkLibDir);
+
+console.log(`[fix-macos-bundle-deps] Framework dylibs: ${frameworkFiles.length}, libexec tools: ${libexecFiles.length}, root framework dylibs: ${frameworkRootLibs.length}`);
+console.log(`[fix-macos-bundle-deps] Resource binaries: ${resourceBinaryFiles.length}, explicit sidecars: ${explicitMacSidecarFiles.length}, app executables: ${macosFiles.length}`);
+console.log('[fix-macos-bundle-deps] Re-signing patched bundle contents');
+resignBundle(appPath, [...frameworkFiles, ...libexecFiles, ...frameworkRootLibs, ...externalLibs.values(), ...resourceBinaryFiles, ...explicitMacSidecarFiles, ...macosFiles, resolveFrameworkSignTarget(frameworkBundleDir)]);
+console.log('[fix-macos-bundle-deps] Verifying explicitly managed macOS sidecars');
+verifySignedMacSidecars(explicitMacSidecarFiles);
+console.log('[fix-macos-bundle-deps] Rebuilding DMG payload');
+cleanupStaleMacDmgArtifacts(targetReleaseDir);
+rebuildDmg(appPath, dmgPath, productName);
+if (!verifyDmgBundle(dmgPath, productName)) {
+  console.warn(`Initial DMG payload verification failed for ${dmgPath}; rebuilding from a fresh copy of the patched app bundle.`);
+  rebuildDmgFromFreshCopy(appPath, dmgPath, productName);
+  if (!verifyDmgBundle(dmgPath, productName)) {
+    throw new Error(`Final DMG verification failed for ${dmgPath}`);
+  }
+}
+console.log(`Patched macOS bundle dependencies: ${appPath}`);
+
+function chooseTargetReleaseDir() {
+  const explicitTargetApp = join(tripleTargetDir, bundleAppRelativePath);
+  if (existsSync(explicitTargetApp)) {
+    return tripleTargetDir;
+  }
+
+  const defaultTargetApp = join(defaultTargetDir, bundleAppRelativePath);
+  if (existsSync(defaultTargetApp)) {
+    return defaultTargetDir;
+  }
+
+  return existsSync(tripleTargetDir) ? tripleTargetDir : defaultTargetDir;
+}
+
+function patchFile(file) {
+  const realFile = safeRealpath(file);
+  if (scanned.has(realFile)) return;
+  scanned.add(realFile);
+
+  const deps = listDependencies(file);
+  for (const dep of deps) {
+    if (!shouldRewriteDependency(dep)) continue;
+    const bundledTarget = resolveBundledTarget(dep);
+    if (!bundledTarget) continue;
+    const desired = installNameForConsumer(file, bundledTarget);
+    run('install_name_tool', ['-change', dep, desired, file]);
+    if (!allTargets.has(bundledTarget)) {
+      allTargets.add(bundledTarget);
+      patchFile(bundledTarget);
+    }
+  }
+}
+
+function resolveBundledTarget(dep) {
+  if (dep.startsWith('/Library/Frameworks/GStreamer.framework/Versions/Current/lib/')) {
+    const suffix = dep.split('/lib/')[1];
+    const candidate = suffix ? join(frameworkLibDir, suffix) : null;
+    if (candidate && existsSync(candidate)) return candidate;
+  }
+  if (dep.startsWith('@executable_path/../Resources/gstreamer/macos/GStreamer.framework/Versions/Current/lib/')) {
+    const suffix = dep.split('/lib/')[1];
+    const candidate = suffix ? join(frameworkLibDir, suffix) : null;
+    if (candidate && existsSync(candidate)) return candidate;
+  }
+  if (dep.startsWith('@executable_path/../Frameworks/GStreamer.framework/Versions/Current/lib/')) {
+    const suffix = dep.split('/lib/')[1];
+    const candidate = suffix ? join(frameworkLibDir, suffix) : null;
+    if (candidate && existsSync(candidate)) return candidate;
+  }
+  if (dep.startsWith('@rpath/GStreamer.framework/Versions/Current/lib/')) {
+    const suffix = dep.split('/lib/')[1];
+    const candidate = suffix ? join(frameworkLibDir, suffix) : null;
+    if (candidate && existsSync(candidate)) return candidate;
+  }
+
+  const nativeRpathTarget = resolveNativeRpathTarget(dep) || resolveNativeLoaderPathTarget(dep);
+  if (nativeRpathTarget) {
+    return stageExternalLibrary(nativeRpathTarget);
+  }
+
+  const suffix = dep.includes('/lib/') ? dep.split('/lib/')[1] : null;
+  if (suffix) {
+    const candidate = join(frameworkLibDir, suffix);
+    if (existsSync(candidate)) return candidate;
+  }
+  const name = basename(dep);
+  if (frameworkRootIndex.has(name)) {
+    return frameworkRootIndex.get(name);
+  }
+  if (frameworkIndex.has(name)) {
+    return frameworkIndex.get(name);
+  }
+  if (externalLibs.has(dep)) {
+    return externalLibs.get(dep);
+  }
+  if (!existsSync(dep)) {
+    return null;
+  }
+
+  return stageExternalLibrary(dep);
+}
+
+function installNameForConsumer(consumer, target) {
+  if (target.startsWith(frameworkLibDir)) {
+    const rel = relative(frameworkLibDir, target);
+    if (consumer.startsWith(macosDir)) {
+      return `@executable_path/../Resources/gstreamer/macos/GStreamer.framework/Versions/Current/lib/${toPosix(rel)}`;
+    }
+  }
+  const consumerDir = dirname(consumer);
+  const rel = relative(consumerDir, target);
+  return `@loader_path/${toPosix(rel)}`;
+}
+
+function rewriteRemainingGStreamerDeps(file) {
+  for (const dep of listDependencies(file)) {
+    if (!dep.includes('GStreamer.framework/Versions/Current/lib/')) continue;
+    const target = resolveBundledTarget(dep);
+    if (!target) continue;
+    const desired = installNameForConsumer(file, target);
+    if (dep === desired) continue;
+    run('install_name_tool', ['-change', dep, desired, file], { allowFailure: false });
+  }
+}
+
+function rewriteBuildTreeGStreamerDeps(file) {
+  for (const dep of listDependencies(file)) {
+    if (!dep.startsWith(`${bundledFrameworkBuildLibDir}/`)) continue;
+    const target = resolveBundledTarget(dep);
+    if (!target) continue;
+    const desired = installNameForConsumer(file, target);
+    if (dep === desired) continue;
+    run('install_name_tool', ['-change', dep, desired, file], { allowFailure: false });
+  }
+}
+
+// Rewrites @loader_path deps that escape the framework boundary and reference
+// Contents/Frameworks/libXXX.dylib — these were baked in when GStreamer.framework
+// lived in Contents/Frameworks/ but the framework is now in
+// Contents/Resources/gstreamer/macos/GStreamer.framework/.
+// Strategy: if the dep name matches a file in the framework's own lib/ dir,
+// repoint it there with a @loader_path relative to the consumer.
+function rewriteStaleLoaderPathFrameworkDeps(file) {
+  // Root app binaries legitimately load project-native libopus/SDL from
+  // Contents/Frameworks. Only consumers inside the relocated GStreamer
+  // framework can contain stale references to the framework's old location.
+  if (!resolve(file).startsWith(resolve(frameworkBundleDir))) return;
+
+  for (const dep of listDependencies(file)) {
+    if (!dep.startsWith('@loader_path/')) continue;
+    // Only handle deps that ultimately reference Contents/Frameworks/ by
+    // traversing upward many levels (the old layout).
+    if (!dep.includes('Frameworks/')) continue;
+    const name = basename(dep);
+    const target = frameworkIndex.get(name) || frameworkRootIndex.get(name);
+    if (!target) continue;
+    const desired = installNameForConsumer(file, target);
+    if (dep === desired) continue;
+    console.log(`[fix-macos-bundle-deps] Rewriting stale Frameworks ref in ${basename(file)}: ${dep} → ${desired}`);
+    run('install_name_tool', ['-change', dep, desired, file], { allowFailure: false });
+  }
+}
+
+
+function frameworkIdFor(file) {
+  const rel = relative(frameworkLibDir, file);
+  return `@rpath/GStreamer.framework/Versions/Current/lib/${toPosix(rel)}`;
+}
+
+function listDependencies(file) {
+  const output = run('otool', ['-L', file], { allowFailure: true });
+  if (output.status !== 0) return [];
+  return output.stdout
+    .split(/\r?\n/u)
+    .slice(1)
+    .map(parseOtoolDependencyLine)
+    .filter(Boolean);
+}
+
+function parseOtoolDependencyLine(line) {
+  const trimmed = line.trim();
+  const metadataIndex = trimmed.lastIndexOf(' (compatibility version ');
+  return metadataIndex >= 0 ? trimmed.slice(0, metadataIndex) : null;
+}
+
+function setInstallId(file, id) {
+  if (!file.endsWith('.dylib')) return;
+  run('install_name_tool', ['-id', id, file], { allowFailure: true });
+}
+
+
+function pruneIrrelevantMacResourceSidecars(destinationDir, targetTriple) {
+  if (!existsSync(destinationDir)) return;
+
+  const managedMacSidecarPrefixes = [
+    'ssh-',
+    'scp-',
+    'ssh-keygen-',
+  ];
+
+  for (const entry of readdirSync(destinationDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+
+    if (/^(?:wireguard|wg|wg-quick|wg-bash|wg-quick-real)-/u.test(entry.name)) {
+      rmSync(join(destinationDir, entry.name), { force: true });
+      continue;
+    }
+
+    const isManagedMacSidecar = managedMacSidecarPrefixes.some((prefix) => entry.name.startsWith(prefix));
+    if (!isManagedMacSidecar) continue;
+    if (!entry.name.endsWith(targetTriple)) {
+      rmSync(join(destinationDir, entry.name), { force: true });
+    }
+  }
+}
+
+function ensureMicrophoneUsageDescription(infoPlist, message) {
+  if (!existsSync(infoPlist)) return;
+  const printResult = run('plutil', ['-extract', 'NSMicrophoneUsageDescription', 'raw', infoPlist], { allowFailure: true });
+  if (printResult.status === 0) {
+    run('plutil', ['-replace', 'NSMicrophoneUsageDescription', '-string', message, infoPlist], { allowFailure: false });
+    return;
+  }
+  run('plutil', ['-insert', 'NSMicrophoneUsageDescription', '-string', message, infoPlist], { allowFailure: false });
+}
+
+// Sign the versioned bundle (Versions/1.0 or Versions/Current) rather than the
+// framework root. codesign rejects the root when any non-Versions items exist
+// there (e.g. materialized symlinks), reporting "unsealed contents present in
+// the root directory of an embedded framework".
+function resolveFrameworkSignTarget(frameworkDir) {
+  if (!existsSync(frameworkDir)) return frameworkDir;
+  for (const version of ['1.0', 'Current']) {
+    const versioned = join(frameworkDir, 'Versions', version);
+    if (existsSync(versioned)) {
+      console.log(`[fix-macos-bundle-deps] Signing framework via versioned path: Versions/${version}`);
+      return versioned;
+    }
+  }
+  return frameworkDir;
+}
+
+// Inject LC_RPATH entries pointing at the bundled GStreamer lib directory into
+// the mic-sender sidecar binary. Without this, SIP silently drops the
+// DYLD_FRAMEWORK_PATH / DYLD_FALLBACK_LIBRARY_PATH env vars that the Rust
+// host process sets, so the sidecar crashes at startup before writing any log.
+//
+// Add only the portable @executable_path-relative path. Absolute build-machine
+// rpaths make the signed app non-relocatable and can hide missing bundle files.
+function injectMicSidecarGStreamerRpath(appMacosDir, gstreamerLibDir) {
+  if (!existsSync(gstreamerLibDir)) {
+    console.warn(`[fix-macos-bundle-deps] GStreamer lib dir not found; skipping rpath injection: ${gstreamerLibDir}`);
+    return;
+  }
+  const sidecarNames = ['noland-mic-sender', `noland-mic-sender-${target}`];
+  for (const name of sidecarNames) {
+    const sidecar = join(appMacosDir, name);
+    if (!existsSync(sidecar)) continue;
+    // @executable_path/../Resources/gstreamer/macos/GStreamer.framework/Versions/Current/lib
+    // This resolves correctly regardless of where the .app is installed.
+    const relativeRpath = '@executable_path/../Resources/gstreamer/macos/GStreamer.framework/Versions/Current/lib';
+    const existingRpaths = getMachORpaths(sidecar);
+    if (!existingRpaths.includes(relativeRpath)) {
+      console.log(`[fix-macos-bundle-deps] Injecting rpath into ${name}: ${relativeRpath}`);
+      run('install_name_tool', ['-add_rpath', relativeRpath, sidecar], { allowFailure: false });
+    }
+    if (!getMachORpaths(sidecar).includes(relativeRpath)) {
+      throw new Error(`Required GStreamer rpath was not added to ${sidecar}`);
+    }
+  }
+}
+
+function getMachORpaths(file) {
+  const result = run('otool', ['-l', file], { allowFailure: true });
+  if (result.status !== 0) return [];
+  const rpaths = [];
+  const lines = result.stdout.split(/\r?\n/u);
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].includes('LC_RPATH')) {
+      // path line format: "    path /some/path with spaces (offset 12)"
+      // Use a greedy match up to the trailing " (offset" metadata.
+      for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+        const match = lines[j].match(/^\s+path\s+(.+?)\s+\(offset/);
+        if (match) { rpaths.push(match[1].trim()); break; }
+      }
+    }
+  }
+  return rpaths;
+}
+
+
+function resignBundle(app, nestedFiles) {
+  run('xattr', ['-cr', app], { allowFailure: true });
+
+  const uniqueNested = Array.from(new Set((nestedFiles || []).map(safeRealpath)))
+    .filter((file) => existsSync(file))
+    .sort((a, b) => b.length - a.length);
+
+  console.log(`[fix-macos-bundle-deps] Signing ${uniqueNested.length} nested code objects`);
+  for (const file of uniqueNested) {
+    signCodeObject(file, { runtime: shouldEnableHardenedRuntime(file) });
+  }
+
+  console.log('[fix-macos-bundle-deps] Signing final .app bundle');
+  signCodeObject(app, { runtime: appleSigningIdentity !== '' });
+}
+
+function signCodeObject(path, { runtime }) {
+  console.log(`[fix-macos-bundle-deps] Signing ${relative(appPath, path) || '.'}${runtime ? ' (runtime)' : ''}`);
+  const args = ['--force'];
+  const isMicSidecar = basename(path).startsWith('noland-mic-sender');
+  if (appleSigningIdentity) {
+    args.push('--sign', appleSigningIdentity, '--timestamp');
+    if (runtime) {
+      args.push('--options', 'runtime');
+      args.push(`--preserve-metadata=${isMicSidecar ? 'identifier,flags,runtime,requirements' : 'identifier,entitlements,flags,runtime,requirements'}`);
+    }
+  } else {
+    args.push('--sign', '-', '--timestamp=none');
+  }
+  if (isMicSidecar && existsSync(micSidecarEntitlements)) {
+    args.push('--entitlements', micSidecarEntitlements);
+  }
+  args.push(path);
+  run('codesign', args, { allowFailure: false });
+}
+
+function shouldEnableHardenedRuntime(file) {
+  if (!appleSigningIdentity || !existsSync(file)) {
+    return false;
+  }
+  if (basename(file).endsWith('.dylib')) {
+    return false;
+  }
+
+  const info = run('file', ['-b', file], { allowFailure: true });
+  return info.status === 0 && info.stdout.includes('Mach-O');
+}
+
+function collectExplicitMacSidecarFiles(appMacosDir, appResourcesBinariesDir, targetTriple) {
+  const candidates = [
+    join(appMacosDir, 'noland-net-helper'),
+    join(appMacosDir, `noland-net-helper-${targetTriple}`),
+    join(appMacosDir, 'noland-mic-sender'),
+    join(appMacosDir, `noland-mic-sender-${targetTriple}`),
+    join(appResourcesBinariesDir, `ssh-${targetTriple}`),
+    join(appResourcesBinariesDir, `scp-${targetTriple}`),
+    join(appResourcesBinariesDir, `ssh-keygen-${targetTriple}`),
+  ];
+  return candidates.filter((file, index, list) => existsSync(file) && list.indexOf(file) === index);
+}
+
+function verifySignedMacSidecars(files) {
+  for (const file of files) {
+    const verify = run('codesign', ['--verify', '--verbose=2', file], { allowFailure: true });
+    if (verify.status !== 0) {
+      throw new Error(`Bundled macOS sidecar is not signed correctly: ${file}\n${verify.stderr || verify.stdout}`);
+    }
+  }
+}
+
+function rebuildDmg(app, dmg, volumeName) {
+  mkdirSync(dirname(dmg), { recursive: true });
+  if (existsSync(dmg)) rmSync(dmg, { force: true });
+
+  const tempDir = mkdtempSync(join(tmpdir(), 'noland-dmg-out-'));
+  const tempRoot = mkdtempSync(join(tmpdir(), 'noland-dmg-src-'));
+  const tempDmg = join(tempDir, basename(dmg));
+  const stagedApp = join(tempRoot, basename(app));
+  try {
+    run('ditto', [app, stagedApp]);
+    createDmgWithRetry(tempRoot, tempDmg, volumeName);
+    copyFileSync(tempDmg, dmg);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
+}
+
+function createDmgWithRetry(sourceFolder, outputDmg, volumeName) {
+  const args = ['create', '-volname', volumeName, '-srcfolder', sourceFolder, '-ov', '-format', 'UDZO', outputDmg];
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    const result = run('hdiutil', args, { allowFailure: true });
+    if (result.status === 0) {
+      return;
+    }
+
+    const output = `${result.stdout || ''}\n${result.stderr || ''}`.trim();
+    const resourceBusy = /Resource busy/i.test(output);
+    if (resourceBusy && attempt < 3) {
+      console.warn(`[fix-macos-bundle-deps] hdiutil create reported a transient resource-busy error on attempt ${attempt}; retrying. Output:\n${output}`);
+      sleepMs(2000);
+      continue;
+    }
+
+    throw new Error(`hdiutil ${args.join(' ')} failed: ${output}`);
+  }
+}
+
+function sleepMs(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
+
+function rebuildDmgFromFreshCopy(app, dmg, volumeName) {
+  rebuildDmg(app, dmg, volumeName);
+}
+
+function cleanupStaleMacDmgArtifacts(releaseDir) {
+  const macosBundleDir = join(releaseDir, 'bundle', 'macos');
+  if (!existsSync(macosBundleDir)) return;
+
+  for (const entry of readdirSync(macosBundleDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    if (!/^rw\.[^.]+\..+\.dmg$/u.test(entry.name)) continue;
+    rmSync(join(macosBundleDir, entry.name), { force: true });
+  }
+}
+
+function verifyDmgBundle(dmg, volumeName) {
+  if (!existsSync(dmg)) {
+    return false;
+  }
+
+  const mountPoint = mkdtempSync(join(tmpdir(), 'noland-dmg-mount-'));
+  const mountedApp = join(mountPoint, `${volumeName}.app`);
+  const mountedBinary = join(mountedApp, 'Contents', 'MacOS', 'noland-connect');
+  const mountedFrameworksDir = join(mountedApp, 'Contents', 'Frameworks');
+
+  try {
+    const attach = run('hdiutil', ['attach', dmg, '-mountpoint', mountPoint, '-nobrowse', '-readonly'], { allowFailure: true });
+    if (attach.status !== 0) {
+      return false;
+    }
+
+    const requiredFrameworks = ['libcrypto.3.dylib', 'libopus.0.dylib', 'libSDL2-2.0.0.dylib'];
+    for (const dylib of requiredFrameworks) {
+      if (!existsSync(join(mountedFrameworksDir, dylib))) {
+        return false;
+      }
+    }
+
+    const deps = listDependencies(mountedBinary);
+    return requiredFrameworks.every((dylib) => deps.includes(`@loader_path/../Frameworks/${dylib}`));
+  } finally {
+    run('hdiutil', ['detach', mountPoint], { allowFailure: true });
+    rmSync(mountPoint, { recursive: true, force: true });
+  }
+}
+
+function ensureBundledSdl3(frameworksDir, frameworkRootLibs) {
+  const sdl2Compat = join(frameworksDir, 'libSDL2-2.0.0.dylib');
+  if (!existsSync(sdl2Compat)) return;
+
+  const sdl2Deps = listDependencies(sdl2Compat);
+  const needsSdl3 = sdl2Deps.some((dep) => basename(dep).startsWith('libSDL3'));
+  if (!needsSdl3) {
+    return;
+  }
+
+  const sdl3Dest = join(frameworksDir, 'libSDL3.dylib');
+  const sdl3CompatDest = join(frameworksDir, 'libSDL3.0.dylib');
+  if (existsSync(sdl3Dest) && existsSync(sdl3CompatDest)) {
+    for (const existing of [sdl3Dest, sdl3CompatDest]) {
+      if (!frameworkRootLibs.includes(existing) && isMachOCandidate(existing)) {
+        frameworkRootLibs.push(existing);
+      }
+    }
+    return;
+  }
+
+  const nativePrefix = process.env.NOLAND_NATIVE_DEPS_PREFIX?.trim();
+  const explicitSdl3 = process.env.NOLAND_SDL3_DYLIB?.trim();
+  const sdl3Candidates = [
+    explicitSdl3,
+    nativePrefix ? join(nativePrefix, 'lib', 'libSDL3.dylib') : null,
+  ].filter(Boolean);
+
+  const sdl3 = sdl3Candidates.find((candidate) => existsSync(candidate));
+  if (!sdl3) {
+    throw new Error(`SDL3 companion library is required for ${sdl2Compat} but no project-managed libSDL3.dylib source was found`);
+  }
+
+  const companionCandidates = [
+    sdl3.replace(/libSDL3\.dylib$/, 'libSDL3.0.dylib'),
+  ];
+
+  const toCopy = [sdl3, ...companionCandidates.filter((candidate) => existsSync(candidate))];
+  for (const source of toCopy) {
+    const dest = join(frameworksDir, basename(source));
+    if (existsSync(dest)) {
+      rmSync(dest, { force: true });
+    }
+    copyFileSync(source, dest);
+    try {
+      chmodSync(dest, statSync(source).mode);
+    } catch {}
+    if (!frameworkRootLibs.includes(dest) && isMachOCandidate(dest)) {
+      frameworkRootLibs.push(dest);
+    }
+  }
+
+  if (!existsSync(sdl3Dest)) {
+    throw new Error(`Failed to bundle libSDL3.dylib into ${frameworksDir}`);
+  }
+}
+
+function sanitizeBundleSymlinks(root) {
+  if (!existsSync(root)) return;
+
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name);
+      const stats = lstatSync(full);
+      if (stats.isSymbolicLink()) {
+        sanitizeSymlink(full, root);
+        continue;
+      }
+      if (stats.isDirectory()) {
+        stack.push(full);
+      }
+    }
+  }
+}
+
+function sanitizeSymlink(path, bundleRoot) {
+  const rawTarget = readlinkSync(path);
+  const resolvedTarget = resolve(dirname(path), rawTarget);
+  const bundleRootResolved = resolve(bundleRoot);
+  const relativePath = relative(bundleRootResolved, resolvedTarget);
+  const pointsOutsideBundle = relativePath === '' ? false : relativePath.startsWith('..');
+  const unsafeTarget = isAbsolute(rawTarget) || pointsOutsideBundle;
+
+  if (!existsSync(resolvedTarget)) {
+    console.warn(`[fix-macos-bundle-deps] Removing broken symlink ${relative(appPath, path) || '.'} -> ${rawTarget}`);
+    rmSync(path, { recursive: true, force: true });
+    return;
+  }
+
+  if (!unsafeTarget) {
+    return;
+  }
+
+  console.log(`[fix-macos-bundle-deps] Materializing unsafe symlink ${relative(appPath, path) || '.'} -> ${rawTarget}${pointsOutsideBundle ? ' (outside bundle)' : ''}`);
+
+  rmSync(path, { recursive: true, force: true });
+  const targetStats = statSync(resolvedTarget);
+  if (targetStats.isDirectory()) {
+    cpSync(resolvedTarget, path, { recursive: true, force: true, dereference: true });
+    return;
+  }
+
+  copyFileSync(resolvedTarget, path);
+  try {
+    chmodSync(path, targetStats.mode);
+  } catch {}
+}
+
+function listFiles(root) {
+  if (!existsSync(root)) return [];
+  const results = [];
+  const stack = [root];
+  while (stack.length > 0) {
+    const current = stack.pop();
+    for (const entry of readdirSync(current, { withFileTypes: true })) {
+      const full = join(current, entry.name);
+      if (entry.isDirectory()) {
+        stack.push(full);
+      } else if (entry.isFile() || entry.isSymbolicLink()) {
+        results.push(full);
+      }
+    }
+  }
+  return results;
+}
+
+function isMachOCandidate(file) {
+  const name = basename(file);
+  if (name.endsWith('.dylib')) return true;
+  try {
+    const mode = statSync(file).mode;
+    if ((mode & 0o111) === 0) {
+      return false;
+    }
+    const info = run('file', ['-b', file], { allowFailure: true });
+    return info.status === 0 && info.stdout.includes('Mach-O');
+  } catch {
+    return false;
+  }
+}
+
+function isCodeSignableFile(file) {
+  if (isMachOCandidate(file)) {
+    return true;
+  }
+  try {
+    return (statSync(file).mode & 0o111) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+function isHomebrewPath(dep) {
+  return dep.startsWith('/opt/homebrew/') || dep.startsWith('/usr/local/');
+}
+
+function isManagedNativeDependency(dep) {
+  if (!nativePrefix) {
+    return false;
+  }
+
+  const nativeLibDir = toPosix(join(nativePrefix, 'lib'));
+  const nativeLib64Dir = toPosix(join(nativePrefix, 'lib64'));
+  return dep.startsWith(`${nativeLibDir}/`) || dep.startsWith(`${nativeLib64Dir}/`);
+}
+
+function shouldRewriteDependency(dep) {
+  return isHomebrewPath(dep)
+    || isManagedNativeDependency(dep)
+    || dep.startsWith('/Library/Frameworks/GStreamer.framework/')
+    || dep.startsWith('@executable_path/../Frameworks/GStreamer.framework/')
+    || dep.startsWith('@executable_path/../Resources/gstreamer/macos/GStreamer.framework/')
+    || dep.startsWith('@rpath/GStreamer.framework/')
+    || dep.startsWith(`${bundledFrameworkBuildLibDir}/`)
+    || dep.includes('/GStreamer.framework/')
+    || Boolean(resolveNativeRpathTarget(dep))
+    || Boolean(resolveNativeLoaderPathTarget(dep));
+}
+
+function resolveNativeRpathTarget(dep) {
+  if (!nativePrefix || !dep.startsWith('@rpath/')) {
+    return null;
+  }
+
+  const candidate = join(nativePrefix, 'lib', basename(dep));
+  return existsSync(candidate) ? candidate : null;
+}
+
+function resolveNativeLoaderPathTarget(dep) {
+  if (!nativePrefix || !dep.startsWith('@loader_path/')) {
+    return null;
+  }
+  if (!dep.includes('.native-deps/')) {
+    return null;
+  }
+
+  const candidate = join(nativePrefix, 'lib', basename(dep));
+  return existsSync(candidate) ? candidate : null;
+}
+
+function stageExternalLibrary(sourcePath) {
+  if (externalLibs.has(sourcePath)) {
+    return externalLibs.get(sourcePath);
+  }
+
+  const dest = join(frameworksDir, basename(sourcePath));
+  if (!existsSync(dest)) {
+    mkdirSync(dirname(dest), { recursive: true });
+    copyFileSync(sourcePath, dest);
+    try {
+      chmodSync(dest, statSync(sourcePath).mode);
+    } catch {}
+  }
+  externalLibs.set(sourcePath, dest);
+  if (!frameworkRootIndex.has(basename(dest))) {
+    frameworkRootIndex.set(basename(dest), dest);
+  }
+  return dest;
+}
+
+function toPosix(value) {
+  return value.split('\\').join('/');
+}
+
+function safeRealpath(file) {
+  try {
+    return realpathSync(file);
+  } catch {
+    return file;
+  }
+}
+
+function run(command, args, options = {}) {
+  const result = spawnSync(command, args, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  if (result.status !== 0 && !options.allowFailure) {
+    throw new Error(`${command} ${args.join(' ')} failed: ${result.stderr || result.stdout}`);
+  }
+  return result;
+}

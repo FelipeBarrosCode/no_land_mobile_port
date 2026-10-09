@@ -1,0 +1,537 @@
+use std::{
+    collections::{HashSet, VecDeque},
+    env, fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+const MAX_SEARCH_DEPTH: usize = 4;
+
+pub fn bundled_binary_names(stem: &str, uses_exe_suffix: bool, target_triple: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    if uses_exe_suffix {
+        names.push(format!("{stem}.exe"));
+    }
+    names.push(stem.to_string());
+
+    if !target_triple.is_empty() {
+        if uses_exe_suffix {
+            names.push(format!("{stem}-{target_triple}.exe"));
+        }
+        names.push(format!("{stem}-{target_triple}"));
+    }
+
+    names.sort();
+    names.dedup();
+    names
+}
+
+pub fn is_executable_file(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            return false;
+        }
+    }
+
+    !is_debug_placeholder_stub(path) && has_valid_executable_header(path)
+}
+
+fn is_debug_placeholder_stub(path: &Path) -> bool {
+    let Ok(bytes) = fs::read(path) else {
+        return false;
+    };
+    let preview_len = bytes.len().min(512);
+    let preview = String::from_utf8_lossy(&bytes[..preview_len]).to_ascii_lowercase();
+    preview.contains("debug placeholder") && preview.contains("npm run tauri:dev")
+}
+
+fn has_valid_executable_header(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        let uses_exe_suffix = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(|extension| extension.eq_ignore_ascii_case("exe"))
+            .unwrap_or(false);
+        if uses_exe_suffix {
+            let Ok(bytes) = fs::read(path) else {
+                return false;
+            };
+            return bytes.len() >= 2 && bytes[0] == b'M' && bytes[1] == b'Z';
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    let _ = path;
+
+    true
+}
+
+pub fn configure_bundled_linux_runtime(
+    command: &mut Command,
+    binary: &Path,
+    runtime_family: &str,
+    target_triple: &str,
+) {
+    #[cfg(target_os = "linux")]
+    {
+        let Some(binary_dir) = binary.parent() else {
+            return;
+        };
+        let runtime_dir = binary_dir.join(runtime_family).join(target_triple);
+        if !runtime_dir.is_dir() {
+            return;
+        }
+
+        // Keep sidecar runtime libraries scoped and deterministic. Inheriting the
+        // parent LD_LIBRARY_PATH can interpose unrelated GTK/GLib/AT-SPI libs and
+        // crash older LTS distros with symbol lookup errors.
+        if let Ok(value) = env::join_paths([runtime_dir]) {
+            command.env("LD_LIBRARY_PATH", value);
+        }
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (command, binary, runtime_family, target_triple);
+    }
+}
+
+pub fn locate_bundled_binary(
+    stem: &str,
+    env_var: &str,
+    uses_exe_suffix: bool,
+    target_triple: &str,
+) -> Option<PathBuf> {
+    let env_override = env::var(env_var)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    if let Some(path) = env_override.filter(|path| is_executable_file(path)) {
+        return Some(path);
+    }
+
+    locate_bundled_binary_in_layout(
+        &bundled_binary_names(stem, uses_exe_suffix, target_triple),
+        env::current_exe().ok().as_deref(),
+        env::current_dir().ok().as_deref(),
+    )
+}
+
+/// Resolve a helper that will be launched with elevated privileges. Unlike
+/// normal sidecars this never searches the current working directory,
+/// recursive ancestors, or user-writable `.local` layouts.
+pub fn locate_privileged_bundled_binary(
+    stem: &str,
+    env_var: &str,
+    uses_exe_suffix: bool,
+    target_triple: &str,
+) -> Option<PathBuf> {
+    #[cfg(debug_assertions)]
+    if let Some(path) = env::var(env_var)
+        .ok()
+        .map(|value| PathBuf::from(value.trim()))
+        .filter(|path| is_executable_file(path))
+    {
+        return Some(path);
+    }
+
+    #[cfg(not(debug_assertions))]
+    let _ = env_var;
+
+    let names = bundled_binary_names(stem, uses_exe_suffix, target_triple);
+    let mut directories = Vec::new();
+    if let Some(executable_dir) = env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+    {
+        directories.push(executable_dir);
+    }
+    #[cfg(target_os = "linux")]
+    directories.extend([
+        PathBuf::from("/usr/bin"),
+        PathBuf::from("/usr/lib/noland-connect"),
+        // Tauri installs `externalBin` sidecars below the package's
+        // resources directory on Debian/AppImage-style Linux layouts.
+        // Keep lookup constrained to package layouts; the candidate must also
+        // match the helper digest embedded in this app build.
+        PathBuf::from("/usr/lib/noland-connect/resources"),
+        PathBuf::from("/usr/lib/Noland Connect"),
+        PathBuf::from("/usr/lib/Noland Connect/resources"),
+    ]);
+
+    directories.into_iter().find_map(|directory| {
+        names.iter().find_map(|name| {
+            let candidate = directory.join(name);
+            is_trusted_privileged_binary(&candidate).then_some(candidate)
+        })
+    })
+}
+
+fn is_trusted_privileged_binary(path: &Path) -> bool {
+    if !is_executable_file(path) {
+        return false;
+    }
+    let Ok(canonical) = path.canonicalize() else {
+        return false;
+    };
+    let _ = &canonical;
+    #[cfg(target_os = "linux")]
+    {
+        // AppImages are mounted by the current user, so ownership checks reject
+        // their immutable payload. Bind the elevated helper to this exact app
+        // build instead, just as on Windows.
+        if !packaged_helper_matches_build(&canonical) {
+            return false;
+        }
+    }
+    #[cfg(all(target_os = "macos", not(debug_assertions)))]
+    {
+        let Ok(current_exe) = env::current_exe().and_then(|path| path.canonicalize()) else {
+            return false;
+        };
+        let Some(app_root) = current_exe
+            .ancestors()
+            .find(|ancestor| ancestor.extension().is_some_and(|value| value == "app"))
+        else {
+            return false;
+        };
+        if !canonical.starts_with(app_root)
+            || !valid_macos_signature(&current_exe)
+            || !valid_macos_signature(&canonical)
+            || macos_team_identifier(&current_exe)
+                .zip(macos_team_identifier(&canonical))
+                .is_none_or(|(app, helper)| app != helper)
+        {
+            return false;
+        }
+    }
+    #[cfg(all(target_os = "windows", not(debug_assertions)))]
+    {
+        let Ok(current_exe) = env::current_exe().and_then(|path| path.canonicalize()) else {
+            return false;
+        };
+        if canonical.parent() != current_exe.parent() || !packaged_helper_matches_build(&canonical)
+        {
+            return false;
+        }
+    }
+    true
+}
+
+#[cfg(target_os = "macos")]
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn valid_macos_signature(path: &Path) -> bool {
+    Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict"])
+        .arg(path)
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+#[cfg(target_os = "macos")]
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn macos_team_identifier(path: &Path) -> Option<String> {
+    let output = Command::new("/usr/bin/codesign")
+        .args(["-dv", "--verbose=4"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&output.stderr)
+        .lines()
+        .find_map(|line| line.strip_prefix("TeamIdentifier="))
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != "not set")
+        .map(str::to_string)
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg_attr(debug_assertions, allow(dead_code))]
+fn packaged_helper_matches_build(helper: &Path) -> bool {
+    let expected = option_env!("NOLAND_NET_HELPER_SHA256").unwrap_or_default();
+    helper_matches_expected_sha256(helper, expected)
+}
+
+#[cfg(any(target_os = "linux", target_os = "windows", test))]
+fn helper_matches_expected_sha256(helper: &Path, expected: &str) -> bool {
+    use sha2::{Digest, Sha256};
+
+    !expected.is_empty()
+        && fs::read(helper)
+            .map(|bytes| format!("{:x}", Sha256::digest(bytes)).eq_ignore_ascii_case(expected))
+            .unwrap_or(false)
+}
+
+pub fn bundled_binary_candidate_paths(
+    names: &[String],
+    current_exe: Option<&Path>,
+    current_dir: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+
+    for seed in search_seed_dirs(current_exe, current_dir) {
+        for relative_dir in candidate_relative_dirs() {
+            let base = if relative_dir.is_empty() {
+                seed.clone()
+            } else {
+                seed.join(relative_dir)
+            };
+            for name in names {
+                let candidate = base.join(name);
+                if seen.insert(candidate.clone()) {
+                    candidates.push(candidate);
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
+pub fn locate_bundled_binary_in_layout(
+    names: &[String],
+    current_exe: Option<&Path>,
+    current_dir: Option<&Path>,
+) -> Option<PathBuf> {
+    let direct_candidates = bundled_binary_candidate_paths(names, current_exe, current_dir);
+    if let Some(found) = direct_candidates
+        .iter()
+        .find(|candidate| is_executable_file(candidate))
+        .cloned()
+    {
+        return Some(found);
+    }
+
+    let recursive_search_roots = search_seed_dirs(current_exe, current_dir);
+    for root in recursive_search_roots {
+        if let Some(found) = find_binary_recursively(&root, names, MAX_SEARCH_DEPTH) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+fn search_seed_dirs(current_exe: Option<&Path>, current_dir: Option<&Path>) -> Vec<PathBuf> {
+    let mut seeds = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Some(exe) = current_exe {
+        if let Some(exe_dir) = exe.parent() {
+            push_path_ancestors(exe_dir, 5, &mut seeds, &mut seen);
+        }
+    }
+
+    if let Some(cwd) = current_dir {
+        push_path_ancestors(cwd, 3, &mut seeds, &mut seen);
+    }
+
+    seeds
+}
+
+fn push_path_ancestors(
+    start: &Path,
+    levels: usize,
+    output: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+) {
+    let mut current = Some(start);
+    for _ in 0..levels {
+        let Some(path) = current else {
+            break;
+        };
+        let owned = path.to_path_buf();
+        if seen.insert(owned.clone()) {
+            output.push(owned);
+        }
+        current = path.parent();
+    }
+}
+
+fn candidate_relative_dirs() -> &'static [&'static str] {
+    &[
+        "",
+        "bin",
+        "binaries",
+        "resources",
+        "resources/bin",
+        "resources/binaries",
+        "Resources",
+        "Resources/bin",
+        "Resources/binaries",
+        "usr/bin",
+        "usr/lib",
+        "usr/lib/binaries",
+        "usr/lib/noland-connect",
+        "usr/lib/noland-connect/binaries",
+        "usr/lib/noland-connect/resources",
+        "usr/lib/noland-connect/resources/binaries",
+        "lib",
+        "lib/binaries",
+        "lib/noland-connect",
+        "lib/noland-connect/binaries",
+        "lib/noland-connect/resources",
+        "lib/noland-connect/resources/binaries",
+    ]
+}
+
+fn find_binary_recursively(root: &Path, names: &[String], max_depth: usize) -> Option<PathBuf> {
+    if !root.is_dir() {
+        return None;
+    }
+
+    let wanted: HashSet<&str> = names.iter().map(String::as_str).collect();
+    let allowed_dir_names = [
+        "bin",
+        "binaries",
+        "resources",
+        "Resources",
+        "lib",
+        "usr",
+        "MacOS",
+        "Frameworks",
+    ];
+
+    let mut queue = VecDeque::from([(root.to_path_buf(), 0usize)]);
+    let mut visited = HashSet::new();
+
+    while let Some((dir, depth)) = queue.pop_front() {
+        if !visited.insert(dir.clone()) {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else {
+            continue;
+        };
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+
+            if wanted.contains(file_name.as_ref()) && is_executable_file(&path) {
+                return Some(path);
+            }
+
+            if depth >= max_depth || !path.is_dir() {
+                continue;
+            }
+
+            let should_descend = depth == 0
+                || allowed_dir_names
+                    .iter()
+                    .any(|allowed| file_name.eq_ignore_ascii_case(allowed))
+                || names.iter().any(|name| file_name.contains(name));
+            if should_descend {
+                queue.push_back((path, depth + 1));
+            }
+        }
+    }
+
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        bundled_binary_candidate_paths, bundled_binary_names, helper_matches_expected_sha256,
+        locate_bundled_binary_in_layout,
+    };
+    use std::{fs, path::PathBuf};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "noland-managed-binaries-{name}-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
+    #[test]
+    fn validates_embedded_helper_digest() {
+        let root = temp_root("helper-digest");
+        let helper = root.join("noland-net-helper.exe");
+        fs::write(&helper, b"packaged helper").unwrap();
+
+        assert!(helper_matches_expected_sha256(
+            &helper,
+            "e414bbdfcb2b696f2079f62ac0519a1825ad3325d5e4701dff64596d0f93e9b9",
+        ));
+        assert!(!helper_matches_expected_sha256(&helper, "incorrect"));
+        assert!(!helper_matches_expected_sha256(&helper, ""));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn write_executable(path: &PathBuf) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            let mut perms = fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(path, perms).unwrap();
+        }
+    }
+
+    #[test]
+    fn generates_ci_aligned_binary_names() {
+        let names = bundled_binary_names("gotatun", false, "x86_64-unknown-linux-gnu");
+        assert!(names.contains(&"gotatun".to_string()));
+        assert!(names.contains(&"gotatun-x86_64-unknown-linux-gnu".to_string()));
+    }
+
+    #[test]
+    fn finds_binary_in_depackaged_resource_layout() {
+        let root = temp_root("depackaged");
+        let current_exe = root
+            .join("Noland Connect.AppDir")
+            .join("usr")
+            .join("bin")
+            .join("noland-connect");
+        let binary = root
+            .join("Noland Connect.AppDir")
+            .join("usr")
+            .join("lib")
+            .join("noland-connect")
+            .join("resources")
+            .join("binaries")
+            .join("gotatun-x86_64-unknown-linux-gnu");
+        write_executable(&binary);
+
+        let names = bundled_binary_names("gotatun", false, "x86_64-unknown-linux-gnu");
+        let found = locate_bundled_binary_in_layout(&names, Some(&current_exe), Some(&root));
+        assert_eq!(found.as_deref(), Some(binary.as_path()));
+    }
+
+    #[test]
+    fn includes_direct_candidates_for_known_layouts() {
+        let root = temp_root("candidates");
+        let current_exe = root.join("bundle").join("MacOS").join("noland-connect");
+        let names = bundled_binary_names("ssh", false, "aarch64-apple-darwin");
+        let candidates = bundled_binary_candidate_paths(&names, Some(&current_exe), Some(&root));
+        assert!(candidates
+            .iter()
+            .any(|path| { path.ends_with("bundle/Resources/binaries/ssh-aarch64-apple-darwin") }));
+    }
+}
