@@ -364,10 +364,39 @@ pub async fn verify_wireguard_connection(
     .await;
 
     let config_path = active_wireguard_config_path(context).await?;
-    let tunnel_verification = verify_managed_gotatun_tunnel(&config_path);
+    #[cfg(target_os = "ios")]
+    let result = {
+        // WireGuardKit updates replace the peer, resetting handshake state.
+        // Probe traffic first, then read the current handshake, and retry the
+        // complete check rather than restarting a tunnel which is recovering.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let path = config_path.clone();
+            let result = tokio::task::spawn_blocking(move || check_tunnel_reachability(&path))
+                .await
+                .map_err(|error| {
+                    AppError::Command(format!("Tunnel verification task failed: {error}"))
+                })?;
+            if result.reachable || tokio::time::Instant::now() >= deadline {
+                break result;
+            }
+            info!(detail = ?result.error, "Waiting for iOS tunnel handshake and Sunshine reachability after configuration update");
+            sleep(Duration::from_millis(500)).await;
+        }
+    };
+    #[cfg(not(target_os = "ios"))]
+    let result = check_tunnel_reachability(&config_path);
+
+    finish_wireguard_verification(app, context, result).await
+}
+
+fn check_tunnel_reachability(config_path: &Path) -> ReachabilityResult {
     let application_reachability =
         tcp_reachability(TUNNEL_HOST, &REACHABILITY_PORTS, Duration::from_secs(2));
-    let result = match tunnel_verification {
+    // TCP probes can trigger the new peer's first handshake. Do not retain a
+    // stale pre-probe failure when those probes have just succeeded.
+    let tunnel_verification = verify_managed_gotatun_tunnel(config_path);
+    match tunnel_verification {
         Ok(_) if application_reachability.reachable => ReachabilityResult {
             reachable: true,
             host: TUNNEL_HOST.to_string(),
@@ -394,7 +423,14 @@ pub async fn verify_wireguard_connection(
             reachable_ports: Vec::new(),
             error: Some(error.to_string()),
         },
-    };
+    }
+}
+
+async fn finish_wireguard_verification(
+    app: &AppHandle,
+    context: &AppContext,
+    result: ReachabilityResult,
+) -> AppResult<ReachabilityResult> {
     if result.reachable {
         let verified_at = chrono::Utc::now().to_rfc3339();
         context
