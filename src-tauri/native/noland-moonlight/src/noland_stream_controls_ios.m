@@ -14,10 +14,12 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
 }
 @end
 
-@interface NolandTouchStick : UIControl
+@interface NolandTouchStick : UIView
 @property(nonatomic, strong) UIView* knob;
 @property(nonatomic, copy) void (^changed)(float x, float y);
+@property(nonatomic, strong) UITouch* activeTouch;
 - (void)reset;
+- (void)cancelTrackingWithEvent:(UIEvent*)event;
 @end
 @implementation NolandTouchStick
 - (instancetype)initWithFrame:(CGRect)frame {
@@ -29,6 +31,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
     self.knob.userInteractionEnabled = NO;
     self.knob.backgroundColor = [UIColor colorWithWhite:1 alpha:0.4];
     [self addSubview:self.knob];
+    self.multipleTouchEnabled = NO;
     self.isAccessibilityElement = YES;
     self.accessibilityTraits = UIAccessibilityTraitAllowsDirectInteraction;
   }
@@ -40,23 +43,45 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   CGFloat size = self.bounds.size.width * 0.4;
   self.knob.bounds = CGRectMake(0, 0, size, size);
   self.knob.layer.cornerRadius = size / 2;
-  if (!self.tracking) self.knob.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
+  if (!self.activeTouch) self.knob.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
 }
-- (void)updateTouch:(UITouch*)touch {
-  CGPoint point = [touch locationInView:self];
-  CGFloat radius = MAX(1, self.bounds.size.width * 0.32);
-  CGFloat x = (point.x - CGRectGetMidX(self.bounds)) / radius;
-  CGFloat y = (CGRectGetMidY(self.bounds) - point.y) / radius;
-  CGFloat length = hypot(x, y);
-  if (length > 1) { x /= length; y /= length; }
-  self.knob.center = CGPointMake(CGRectGetMidX(self.bounds) + x * radius, CGRectGetMidY(self.bounds) - y * radius);
-  if (self.changed) self.changed(fabs(x) < 0.12 ? 0 : x, fabs(y) < 0.12 ? 0 : y);
+- (void)updatePoint:(CGPoint)point {
+  // Match Moonlight iOS: the knob center follows the finger exactly while it is
+  // inside the outer travel square. X/Y clamp independently rather than being
+  // normalized to a circle, so diagonals don't pull away from the thumb.
+  CGFloat centerX = CGRectGetMidX(self.bounds), centerY = CGRectGetMidY(self.bounds);
+  CGFloat visualRadius = MAX(1, self.bounds.size.width * 0.30);
+  CGFloat responseRadius = MAX(1, self.bounds.size.width * 0.18);
+  CGFloat knobX = MIN(centerX + visualRadius, MAX(centerX - visualRadius, point.x));
+  CGFloat knobY = MIN(centerY + visualRadius, MAX(centerY - visualRadius, point.y));
+  CGFloat x = MIN(1, MAX(-1, (knobX - centerX) / responseRadius));
+  CGFloat y = MIN(1, MAX(-1, (centerY - knobY) / responseRadius));
+  self.knob.center = CGPointMake(knobX, knobY);
+  // No client deadzone. Games/Sunshine may apply their own, so preserve every
+  // non-zero movement and reach full axis travel early.
+  if (self.changed) self.changed(x, y);
 }
-- (BOOL)beginTracking:(UITouch*)touch withEvent:(UIEvent*)event { [self updateTouch:touch]; return YES; }
-- (BOOL)continueTracking:(UITouch*)touch withEvent:(UIEvent*)event { [self updateTouch:touch]; return YES; }
-- (void)endTracking:(UITouch*)touch withEvent:(UIEvent*)event { [self reset]; }
-- (void)cancelTrackingWithEvent:(UIEvent*)event { [super cancelTrackingWithEvent:event]; [self reset]; }
+- (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  if (self.activeTouch) return;
+  self.activeTouch = touches.anyObject;
+  [self updatePoint:[self.activeTouch locationInView:self]];
+}
+- (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  if (self.activeTouch && [touches containsObject:self.activeTouch])
+    [self updatePoint:[self.activeTouch locationInView:self]];
+}
+- (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  if (self.activeTouch && [touches containsObject:self.activeTouch]) [self reset];
+}
+- (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
+  if (!self.activeTouch || [touches containsObject:self.activeTouch]) [self reset];
+}
+- (void)cancelTrackingWithEvent:(UIEvent*)event {
+  (void)event;
+  [self reset];
+}
 - (void)reset {
+  self.activeTouch = nil;
   self.knob.center = CGPointMake(CGRectGetMidX(self.bounds), CGRectGetMidY(self.bounds));
   if (self.changed) self.changed(0, 0);
 }
@@ -111,7 +136,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   self.leftStick.changed = ^(float x, float y) {
     NolandStreamControls* view = weakSelf;
     if (!view) return;
-    view->_pad.leftX = (int16_t)lrintf(x * 32767); view->_pad.leftY = (int16_t)lrintf(y * 32767);
+    view->_pad.leftX = (int16_t)lrintf(x * 0x7FFE); view->_pad.leftY = (int16_t)lrintf(y * 0x7FFE);
     [view refreshGamepad];
   };
   self.rightStick = [NolandTouchStick new];
@@ -119,7 +144,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   self.rightStick.changed = ^(float x, float y) {
     NolandStreamControls* view = weakSelf;
     if (!view) return;
-    view->_pad.rightX = (int16_t)lrintf(x * 32767); view->_pad.rightY = (int16_t)lrintf(y * 32767);
+    view->_pad.rightX = (int16_t)lrintf(x * 0x7FFE); view->_pad.rightY = (int16_t)lrintf(y * 0x7FFE);
     [view refreshGamepad];
   };
   self.dpad = [NolandTouchStick new];
@@ -195,10 +220,8 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
     [button.heightAnchor constraintEqualToConstant:44].active = YES;
     [self.menuStack addArrangedSubview:button];
   }
-  self.menuButton = [self button:@"☰" action:@selector(toggleMenu)];
-  self.menuButton.accessibilityLabel = NSLocalizedString(@"Open stream menu", nil);
-  self.menuButton.accessibilityHint = NSLocalizedString(@"Also opens by swiping right from the left edge", nil);
-  [self addSubview:self.menuButton];
+  // The drawer intentionally has no persistent screen button. It opens only
+  // with a rightward swipe beginning in the left-edge safe-area strip.
   [self updateModeLabels];
   [self setDrawerProgress:0];
   return self;
@@ -209,7 +232,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   // Establish priority explicitly instead of allowing transparent layers or
   // the text/video responder to acquire a touch intended for a gamepad button.
   NSArray<UIView*>* targets = self.menuVisible ? @[self.drawer, self.scrim]
-      : self.gamepadEnabled ? @[self.menuButton, self.padView] : @[self.menuButton];
+      : self.gamepadEnabled ? @[self.padView] : @[];
   for (UIView* target in targets) {
     UIView* hit = [target hitTest:[self convertPoint:point toView:target] withEvent:event];
     if (hit) return hit;
@@ -264,7 +287,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   self.drawer.hidden = !self.menuVisible;
   // The hamburger is only an opener. Remove it for the entire open/dragged-open
   // state so it doesn't remain as a duplicate control beside the drawer.
-  self.menuButton.hidden = self.menuVisible || _drawerProgress > 0;
+  self.menuButton.hidden = YES;
   self.padView.hidden = !self.gamepadEnabled || self.menuVisible;
 }
 - (void)setMenuOpen:(BOOL)open animated:(BOOL)animated {
@@ -281,7 +304,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   } completion:^(BOOL finished) {
     if (!finished) return;
     [self setDrawerProgress:self->_drawerProgress];
-    UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, open ? self.menuStack : self.menuButton);
+    UIAccessibilityPostNotification(UIAccessibilityScreenChangedNotification, open ? self.menuStack : nil);
   }];
 }
 - (void)toggleMenu { [self setMenuOpen:!self.menuVisible animated:YES]; }
@@ -353,7 +376,6 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   [super layoutSubviews];
   UIEdgeInsets safe = self.safeAreaInsets;
   self.scrim.frame = self.bounds; self.padView.frame = self.bounds;
-  self.menuButton.frame = CGRectMake(safe.left + 8, safe.top + 8, 44, 44);
   [self setDrawerProgress:_drawerProgress];
   CGFloat inset = MAX(16, safe.left);
   CGFloat contentWidth = self.drawer.bounds.size.width - inset - 16;
@@ -363,21 +385,27 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   self.drawer.contentSize = CGSizeMake(self.drawer.bounds.size.width, size.height + safe.top + safe.bottom + 32);
   CGFloat left = safe.left + 12, right = self.bounds.size.width - safe.right - 12;
   CGFloat bottom = self.bounds.size.height - safe.bottom - 12;
-  CGFloat stickSize = MIN(108, MAX(80, (bottom - safe.top) * 0.28));
-  CGFloat face = 46, gap = 48;
-  self.leftStick.frame = CGRectMake(left, bottom - stickSize, stickSize, stickSize);
-  self.rightStick.frame = CGRectMake(right - stickSize - 145, bottom - stickSize, stickSize, stickSize);
-  self.dpad.frame = CGRectMake(left + stickSize + 12, bottom - 94, 94, 94);
-  CGPoint center = CGPointMake(right - 70, bottom - 74);
+  CGFloat availableHeight = MAX(250, bottom - safe.top);
+  CGFloat stickSize = MIN(104, MAX(78, availableHeight * 0.27));
+  CGFloat dpadSize = MIN(88, stickSize);
+  CGFloat face = 44, gap = 46;
+  // Ergonomic handheld layout: movement stick above D-pad on the left; face
+  // buttons above the camera stick on the right.
+  self.leftStick.frame = CGRectMake(left + 12, safe.top + 70, stickSize, stickSize);
+  self.dpad.frame = CGRectMake(left + 20, bottom - dpadSize, dpadSize, dpadSize);
+  self.rightStick.frame = CGRectMake(right - stickSize - 20, bottom - stickSize, stickSize, stickSize);
+  CGPoint center = CGPointMake(right - 70, safe.top + 132);
   CGPoint offsets[] = {{0,gap}, {gap,0}, {-gap,0}, {0,-gap}};
   for (NSUInteger i = 0; i < 4; i++) self.padButtons[i].frame = CGRectMake(center.x + offsets[i].x - face/2, center.y + offsets[i].y - face/2, face, face);
-  CGFloat top = MAX(safe.top + 62, bottom - stickSize - 64);
-  self.padButtons[4].frame = CGRectMake(left, top, 54, 44);
-  self.padButtons[6].frame = CGRectMake(left + 60, top, 54, 44);
-  self.padButtons[5].frame = CGRectMake(right - 54, top, 54, 44);
-  self.padButtons[7].frame = CGRectMake(right - 114, top, 54, 44);
-  self.padButtons[8].frame = CGRectMake(left + stickSize + 12, top, 44, 44);
-  self.padButtons[9].frame = CGRectMake(right - stickSize - 145, top, 44, 44);
+  CGFloat shoulderTop = safe.top + 8;
+  self.padButtons[4].frame = CGRectMake(left, shoulderTop, 54, 44);
+  self.padButtons[6].frame = CGRectMake(left + 60, shoulderTop, 54, 44);
+  self.padButtons[5].frame = CGRectMake(right - 54, shoulderTop, 54, 44);
+  self.padButtons[7].frame = CGRectMake(right - 114, shoulderTop, 54, 44);
+  self.padButtons[8].frame = CGRectMake(CGRectGetMaxX(self.leftStick.frame) + 8,
+                                        CGRectGetMidY(self.leftStick.frame) - 22, 44, 44);
+  self.padButtons[9].frame = CGRectMake(CGRectGetMinX(self.rightStick.frame) - 52,
+                                        CGRectGetMidY(self.rightStick.frame) - 22, 44, 44);
   CGFloat middle = (left + right) / 2;
   self.padButtons[10].frame = CGRectMake(middle - 66, safe.top + 12, 60, 44);
   self.padButtons[11].frame = CGRectMake(middle + 6, safe.top + 12, 60, 44);

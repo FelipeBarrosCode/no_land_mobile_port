@@ -62,6 +62,10 @@ static void runControllerChecks(UIWindow* window) {
   [input.arrivalRetryTimer fire];
   NSCAssert(arrivals == 1 && states == 1 && lastSlot == 0 && lastMask == 1 && lastState.buttons == A_FLAG,
     @"OSC must work alone and retry initial arrival without a physical controller");
+  [input sendVirtualGamepad:(NolandVirtualGamepadState){0} enabled:NO];
+  NSCAssert(lastMask == 1 && lastState.buttons == 0,
+    @"Hiding OSC must keep player 1 plugged in with neutral state");
+  [input sendVirtualGamepad:osc enabled:YES];
 
   GCController* physical = [GCController controllerWithExtendedGamepad];
   [input bindController:physical];

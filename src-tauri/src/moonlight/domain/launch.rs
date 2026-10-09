@@ -99,7 +99,11 @@ pub fn build_launch_parameters(
         // when the first gamepad arrives after launch, which breaks both OSC-only
         // play and a physical controller connected later.
         active_gamepad_mask: if cfg!(target_os = "ios") { 1 } else { 0 },
-        persist_gamepads_after_disconnect: preferences.input.persist_controllers_on_disconnect,
+        // Moonlight iOS sends gcpersist=1 in its normal single-controller mode.
+        // Keeping player 1 plugged in prevents Steam/Proton games from retaining
+        // a stale XInput handle when a stream disconnects and reconnects.
+        persist_gamepads_after_disconnect: cfg!(target_os = "ios")
+            || preferences.input.persist_controllers_on_disconnect,
         hdr: preferences.video.hdr,
     }
 }

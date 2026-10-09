@@ -106,6 +106,7 @@ extern void noland_ios_stream_dismiss(void);
 - (void)announceControllers;
 - (void)beginStream;
 - (void)sendPhysicalController:(GCController*)controller;
+- (BOOL)announcePlayerOneIfNeeded;
 - (void)sendVirtualGamepad:(NolandVirtualGamepadState)state enabled:(BOOL)enabled;
 @end
 
@@ -691,7 +692,10 @@ static int16_t nl_ios_axis(float value) {
   return NSNotFound;
 }
 - (uint16_t)activeMask {
-  uint16_t mask = self.virtualEnabled ? 1 : 0;
+  // Match Moonlight iOS single-controller mode: player 1 remains present even
+  // when OSC is hidden and no physical controller is attached. Overlay
+  // visibility must never hot-unplug the host's XInput device.
+  uint16_t mask = 1;
   for (NSNumber* value in self.controllerNumbers.objectEnumerator) {
     NSUInteger number = value.unsignedIntegerValue;
     if (number < 16) mask |= (uint16_t)(1u << number);
@@ -772,6 +776,8 @@ static int16_t nl_ios_axis(float value) {
 #undef STRONGER_AXIS
     }
     uint16_t mask = [strongSelf activeMask];
+    if (currentNumber == 0 && strongSelf.virtualAnnounced)
+      [strongSelf.announcedControllers addObject:assigned];
     if (![strongSelf.announcedControllers containsObject:assigned]) {
       uint32_t supported = A_FLAG | B_FLAG | X_FLAG | Y_FLAG | UP_FLAG | DOWN_FLAG |
           LEFT_FLAG | RIGHT_FLAG | LB_FLAG | RB_FLAG | PLAY_FLAG | BACK_FLAG |
@@ -794,6 +800,7 @@ static int16_t nl_ios_axis(float value) {
       if (nl_send_controller_arrival(runtime, (uint8_t)currentNumber, mask, controllerType,
                                      supported, capabilities) == NL_RESULT_OK) {
         [strongSelf.announcedControllers addObject:assigned];
+        if (currentNumber == 0) strongSelf.virtualAnnounced = YES;
         if (controller.battery != nil) {
           uint8_t state = LI_BATTERY_STATE_UNKNOWN;
           switch (controller.battery.batteryState) {
@@ -843,7 +850,7 @@ static int16_t nl_ios_axis(float value) {
 #undef BIND_MOUSE_BUTTON
 }
 - (void)start {
-  self.virtualNumber = NSNotFound;
+  self.virtualNumber = 0;
   self.virtualEnabled = NO;
   self.virtualAnnounced = NO;
   self.observers = [NSMutableArray array];
@@ -872,7 +879,6 @@ static int16_t nl_ios_axis(float value) {
       element.preferredSystemGestureState = GCSystemGestureStateEnabled;
     [strongSelf.controllerNumbers removeObjectForKey:controller];
     [strongSelf.announcedControllers removeObject:assigned];
-    if (assigned.unsignedIntegerValue == 0) strongSelf.virtualAnnounced = NO;
     for (id motor in strongSelf.hapticMotors[assigned])
       if ([motor isKindOfClass:[NolandHapticMotor class]]) [motor stop];
     [strongSelf.hapticMotors removeObjectForKey:assigned];
@@ -884,8 +890,8 @@ static int16_t nl_ios_axis(float value) {
       }
     }
     nl_runtime_t* runtime = nl_ios_runtime(strongSelf.renderer);
-    if (assigned.unsignedIntegerValue == 0 && strongSelf.virtualEnabled)
-      [strongSelf sendVirtualGamepad:strongSelf.virtualState enabled:YES];
+    if (assigned.unsignedIntegerValue == 0)
+      [strongSelf sendVirtualGamepad:strongSelf.virtualState enabled:strongSelf.virtualEnabled];
     else if (runtime != NULL)
       nl_send_controller(runtime, assigned.unsignedShortValue, [strongSelf activeMask], 0, 0, 0, 0, 0, 0, 0);
   }];
@@ -903,6 +909,23 @@ static int16_t nl_ios_axis(float value) {
     [self sendPhysicalController:controller];
   }
 }
+- (BOOL)announcePlayerOneIfNeeded {
+  if (self.virtualAnnounced) return YES;
+  for (GCController* controller in self.controllerNumbers.keyEnumerator) {
+    NSNumber* assigned = [self.controllerNumbers objectForKey:controller];
+    if (assigned.unsignedIntegerValue == 0 && [self.announcedControllers containsObject:assigned]) {
+      self.virtualAnnounced = YES;
+      return YES;
+    }
+  }
+  nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
+  if (!runtime || self.inputSuspended) return NO;
+  uint32_t buttons = A_FLAG | B_FLAG | X_FLAG | Y_FLAG | UP_FLAG | DOWN_FLAG | LEFT_FLAG | RIGHT_FLAG |
+      LB_FLAG | RB_FLAG | PLAY_FLAG | BACK_FLAG | LS_CLK_FLAG | RS_CLK_FLAG;
+  self.virtualAnnounced = nl_send_controller_arrival(runtime, 0, [self activeMask],
+      LI_CTYPE_XBOX, buttons, 0) == NL_RESULT_OK;
+  return self.virtualAnnounced;
+}
 - (void)beginStream {
   [self.announcedControllers removeAllObjects];
   self.virtualAnnounced = NO;
@@ -917,19 +940,19 @@ static int16_t nl_ios_axis(float value) {
       if (![input.announcedControllers containsObject:[input.controllerNumbers objectForKey:controller]])
         [input sendPhysicalController:controller];
     }
-    if (input.virtualEnabled && !input.virtualAnnounced)
-      [input sendVirtualGamepad:input.virtualState enabled:YES];
+    if (!input.virtualAnnounced)
+      [input sendVirtualGamepad:input.virtualState enabled:input.virtualEnabled];
   }];
   [NSRunLoop.mainRunLoop addTimer:self.arrivalRetryTimer forMode:NSRunLoopCommonModes];
   [self announceControllers];
+  [self announcePlayerOneIfNeeded];
 }
 - (void)sendVirtualGamepad:(NolandVirtualGamepadState)state enabled:(BOOL)enabled {
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   if (!runtime) return;
   if (!enabled) {
-    NSUInteger number = self.virtualNumber;
     self.virtualEnabled = NO; self.virtualState = (NolandVirtualGamepadState){0};
-    self.virtualNumber = NSNotFound; self.virtualAnnounced = NO;
+    self.virtualNumber = 0;
     for (GCController* controller in self.controllerNumbers.keyEnumerator) {
       NSNumber* assigned = [self.controllerNumbers objectForKey:controller];
       if (assigned.unsignedIntegerValue == 0) {
@@ -937,7 +960,8 @@ static int16_t nl_ios_axis(float value) {
         return;
       }
     }
-    if (number < 16) nl_send_controller(runtime, (uint16_t)number, [self activeMask], 0, 0, 0, 0, 0, 0, 0);
+    if ([self announcePlayerOneIfNeeded])
+      nl_send_controller(runtime, 0, [self activeMask], 0, 0, 0, 0, 0, 0, 0);
     return;
   }
   self.virtualEnabled = YES; self.virtualState = state; self.virtualNumber = 0;
@@ -950,12 +974,7 @@ static int16_t nl_ios_axis(float value) {
     }
   }
   uint16_t mask = [self activeMask];
-  if (!self.virtualAnnounced) {
-    uint32_t buttons = A_FLAG | B_FLAG | X_FLAG | Y_FLAG | UP_FLAG | DOWN_FLAG | LEFT_FLAG | RIGHT_FLAG |
-        LB_FLAG | RB_FLAG | PLAY_FLAG | BACK_FLAG | LS_CLK_FLAG | RS_CLK_FLAG;
-    self.virtualAnnounced = nl_send_controller_arrival(runtime, (uint8_t)self.virtualNumber, mask, LI_CTYPE_XBOX, buttons, 0) == NL_RESULT_OK;
-    if (!self.virtualAnnounced) return;
-  }
+  if (![self announcePlayerOneIfNeeded]) return;
   if (self.inputSuspended) state = (NolandVirtualGamepadState){0};
   nl_send_controller(runtime, (uint16_t)self.virtualNumber, mask, state.buttons,
       state.leftTrigger, state.rightTrigger, state.leftX, state.leftY, state.rightX, state.rightY);
