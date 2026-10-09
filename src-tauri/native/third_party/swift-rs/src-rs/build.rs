@@ -548,11 +548,9 @@ fn globalize_cdecl_symbols(archive: &std::path::Path, package_name: &str) {
         return;
     }
     let Some(objcopy) = rustup_llvm_objcopy() else {
-        println!(
-            "cargo:warning=swift-rs: llvm-objcopy not found (run `rustup component add \
-             llvm-tools`); @_cdecl symbols stay internalized on Xcode 27"
+        panic!(
+            "swift-rs: llvm-objcopy is required for Xcode 27 iOS links; run `rustup component add llvm-tools`"
         );
-        return;
     };
     let mut cmd = Command::new(objcopy);
     for s in &syms {

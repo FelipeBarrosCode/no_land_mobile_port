@@ -6,7 +6,19 @@
 #include <stdlib.h>
 #include <string.h>
 
-#if defined(__APPLE__) || defined(__linux__) || defined(_WIN32)
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#if TARGET_OS_IOS
+extern void nl_ios_controller_rumble(uint16_t controller_number, uint16_t low_frequency, uint16_t high_frequency);
+extern void nl_ios_controller_rumble_triggers(uint16_t controller_number, uint16_t left, uint16_t right);
+extern void nl_ios_controller_set_led(uint16_t controller_number, uint8_t r, uint8_t g, uint8_t b);
+extern void nl_ios_controller_set_motion(uint16_t controller_number, uint8_t motion_type, uint16_t report_rate_hz);
+#endif
+#endif
+
+// UIKit/GameController owns controllers on iOS. Keep SDL controller handling
+// for desktop Apple platforms only.
+#if (defined(__APPLE__) && TARGET_OS_OSX) || defined(__linux__) || defined(_WIN32)
 
 #include <SDL.h>
 
@@ -128,6 +140,7 @@ static uint8_t nl_controller_type(SDL_GameController* controller) {
       return LI_CTYPE_UNKNOWN;
   }
 #else
+
   (void)controller;
   return LI_CTYPE_UNKNOWN;
 #endif
@@ -814,31 +827,38 @@ void nl_controller_manager_stop(nl_controller_manager_t* manager) {
 
 void nl_controller_manager_rumble(nl_controller_manager_t* manager, uint16_t controller_number, uint16_t low_freq_motor, uint16_t high_freq_motor) {
   (void)manager;
-  (void)controller_number;
-  (void)low_freq_motor;
-  (void)high_freq_motor;
+#if defined(__APPLE__) && TARGET_OS_IOS
+  nl_ios_controller_rumble(controller_number, low_freq_motor, high_freq_motor);
+#else
+  (void)controller_number; (void)low_freq_motor; (void)high_freq_motor;
+#endif
 }
 
 void nl_controller_manager_rumble_triggers(nl_controller_manager_t* manager, uint16_t controller_number, uint16_t left_trigger, uint16_t right_trigger) {
   (void)manager;
-  (void)controller_number;
-  (void)left_trigger;
-  (void)right_trigger;
+#if defined(__APPLE__) && TARGET_OS_IOS
+  nl_ios_controller_rumble_triggers(controller_number, left_trigger, right_trigger);
+#else
+  (void)controller_number; (void)left_trigger; (void)right_trigger;
+#endif
 }
 
 void nl_controller_manager_set_motion_event_state(nl_controller_manager_t* manager, uint16_t controller_number, uint8_t motion_type, uint16_t report_rate_hz) {
   (void)manager;
-  (void)controller_number;
-  (void)motion_type;
-  (void)report_rate_hz;
+#if defined(__APPLE__) && TARGET_OS_IOS
+  nl_ios_controller_set_motion(controller_number, motion_type, report_rate_hz);
+#else
+  (void)controller_number; (void)motion_type; (void)report_rate_hz;
+#endif
 }
 
 void nl_controller_manager_set_led(nl_controller_manager_t* manager, uint16_t controller_number, uint8_t r, uint8_t g, uint8_t b) {
   (void)manager;
-  (void)controller_number;
-  (void)r;
-  (void)g;
-  (void)b;
+#if defined(__APPLE__) && TARGET_OS_IOS
+  nl_ios_controller_set_led(controller_number, r, g, b);
+#else
+  (void)controller_number; (void)r; (void)g; (void)b;
+#endif
 }
 
 void nl_controller_manager_set_adaptive_triggers(nl_controller_manager_t* manager, uint16_t controller_number, const nl_dualsense_output_report_t* report) {

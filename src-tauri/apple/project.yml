@@ -89,6 +89,8 @@ targets:
         CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION: YES
         ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true
         EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
+        LIBRARY_SEARCH_PATHS[arch=arm64]: $(inherited) $(PROJECT_DIR)/Externals/arm64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)
+        LIBRARY_SEARCH_PATHS[arch=x86_64]: $(inherited) $(PROJECT_DIR)/Externals/x86_64/$(CONFIGURATION) $(SDKROOT)/usr/lib/swift $(TOOLCHAIN_DIR)/usr/lib/swift/$(PLATFORM_NAME)
       groups: [app]
     dependencies:
       - target: NolandPacketTunnel
@@ -106,9 +108,23 @@ targets:
       - sdk: AVFoundation.framework
       - sdk: AudioToolbox.framework
       - sdk: GameController.framework
+      - sdk: CoreHaptics.framework
+      - sdk: CoreMedia.framework
+      - sdk: CoreVideo.framework
       - sdk: NetworkExtension.framework
+      - sdk: libz.tbd
     preBuildScripts:
-      - script: npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}
+      - script: |
+          if [ "${NOLAND_USE_PREBUILT_RUST:-0}" = "1" ]; then
+            test -f "${PROJECT_DIR}/Externals/arm64/${CONFIGURATION}/libapp.a"
+            exit 0
+          fi
+          export TAURI_CONFIG="$(cat "${PROJECT_DIR}/../../tauri.mobile.conf.json")"
+          if [ "${CONFIGURATION}" = "debug" ]; then
+            export CARGO_PROFILE_DEV_DEBUG=0
+            export CARGO_INCREMENTAL=0
+          fi
+          npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}
         name: Build Rust Code
         basedOnDependencyAnalysis: false
         outputFiles:

@@ -1,5 +1,6 @@
 {
   "mobile.returnToStream": "Revenir au streaming",
+  "mobile.streamStats": "{{fps}} IPS · {{decode}} ms de décodage",
   "app.settings": "Paramètres",
   "app.preferences": "Préférences",
   "settings.profile": "Profil",

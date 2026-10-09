@@ -8,3 +8,7 @@ products. Upstream 1.0.8 promotes each package's own C exports with
 separately linked product. The local patch also promotes that member only while
 processing the Tauri archive. Copies embedded in plugin archives remain local,
 preventing duplicate global symbols.
+
+The patch fails the build with an actionable message when the Rust
+`llvm-tools` component is absent; continuing would only defer the failure to
+Xcode's final link.

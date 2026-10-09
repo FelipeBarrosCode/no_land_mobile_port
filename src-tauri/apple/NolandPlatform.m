@@ -58,6 +58,7 @@ void noland_ios_response_free(char *value) { free(value); }
     [self.view addSubview:self.surface];
     UIButton *controls = [UIButton buttonWithType:UIButtonTypeSystem];
     [controls setTitle:NSLocalizedString(@"Controls", nil) forState:UIControlStateNormal];
+    controls.accessibilityLabel = NSLocalizedString(@"Return to Noland controls", nil);
     controls.backgroundColor = [UIColor.blackColor colorWithAlphaComponent:0.75];
     controls.tintColor = UIColor.whiteColor;
     controls.layer.cornerRadius = 8;
@@ -74,10 +75,20 @@ void noland_ios_response_free(char *value) { free(value); }
 - (void)showControls { [self dismissViewControllerAnimated:NO completion:nil]; }
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations {
+    return UIDevice.currentDevice.userInterfaceIdiom == UIUserInterfaceIdiomPad
+        ? UIInterfaceOrientationMaskAll
+        : UIInterfaceOrientationMaskLandscape;
+}
+- (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation {
+    return UIInterfaceOrientationLandscapeRight;
+}
 @end
 
 static NolandStreamController *streamController;
 static __weak UIView *streamRoot;
+
+extern void *nl_ios_stream_view_create(void);
 
 void *noland_ios_stream_surface(void *root_pointer) {
     __block void *surface = NULL;
@@ -88,6 +99,12 @@ void *noland_ios_stream_surface(void *root_pointer) {
             streamController = [NolandStreamController new];
             streamController.modalPresentationStyle = UIModalPresentationFullScreen;
             [streamController loadViewIfNeeded];
+            UIView *nativeSurface = CFBridgingRelease(nl_ios_stream_view_create());
+            nativeSurface.frame = streamController.view.bounds;
+            nativeSurface.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+            [streamController.surface removeFromSuperview];
+            streamController.surface = nativeSurface;
+            [streamController.view insertSubview:nativeSurface atIndex:0];
         }
         streamRoot = root;
         surface = (__bridge void *)streamController.surface;
@@ -99,6 +116,7 @@ int noland_ios_stream_present(void) {
     __block int result = -1;
     on_main(^{
         if (!streamController || !streamRoot.window) return;
+        UIApplication.sharedApplication.idleTimerDisabled = YES;
         if (streamController.presentingViewController) { result = 0; return; }
         UIViewController *presenter = streamRoot.window.rootViewController;
         while (presenter.presentedViewController) presenter = presenter.presentedViewController;
@@ -107,6 +125,10 @@ int noland_ios_stream_present(void) {
         result = 0;
     });
     return result;
+}
+
+void noland_ios_stream_dismiss(void) {
+    on_main(^{ [streamController dismissViewControllerAnimated:NO completion:nil]; });
 }
 
 void noland_ios_stream_close(void) {

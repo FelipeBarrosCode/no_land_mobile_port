@@ -40,7 +40,7 @@ static int nl_video_renderer_platform_submit_frame_noop(nl_video_renderer_t* ren
   return DR_OK;
 }
 
-#if !defined(__linux__)
+#if !defined(__linux__) && !defined(NOLAND_IOS_RENDERER)
 void nl_video_renderer_platform_set_overlay_text(nl_video_renderer_t* renderer, const char* text) {
   (void)renderer;
   (void)text;

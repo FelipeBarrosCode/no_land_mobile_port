@@ -15,12 +15,22 @@ add_library(noland_moonlight STATIC
   src/noland_frame_deadline_policy.c
 )
 
-find_path(SDL2_INCLUDE_ROOT SDL2/SDL.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS} REQUIRED)
-find_library(SDL2_LIBRARY NAMES SDL2 SDL2-static HINTS ${NOLAND_NATIVE_LIB_HINTS} REQUIRED)
-target_include_directories(noland_moonlight PRIVATE ${SDL2_INCLUDE_ROOT} ${SDL2_INCLUDE_ROOT}/SDL2)
-target_link_libraries(noland_moonlight PRIVATE ${SDL2_LIBRARY})
+if(NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  find_path(SDL2_INCLUDE_ROOT SDL2/SDL.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS} REQUIRED)
+  find_library(SDL2_LIBRARY NAMES SDL2 SDL2-static HINTS ${NOLAND_NATIVE_LIB_HINTS} REQUIRED)
+  target_include_directories(noland_moonlight PRIVATE ${SDL2_INCLUDE_ROOT} ${SDL2_INCLUDE_ROOT}/SDL2)
+  target_link_libraries(noland_moonlight PRIVATE ${SDL2_LIBRARY})
+endif()
 
-if(APPLE)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  target_compile_definitions(noland_moonlight PRIVATE NOLAND_IOS_RENDERER)
+  target_sources(noland_moonlight PRIVATE
+    src/noland_video_renderer_ios.m
+    src/noland_audio_renderer_ios.m
+    src/noland_microphone_ios.m
+    src/noland_input_ios.c
+  )
+elseif(APPLE)
   target_sources(noland_moonlight PRIVATE src/noland_video_renderer_macos.m src/noland_audio_renderer_macos.m)
 elseif(UNIX)
   target_sources(noland_moonlight PRIVATE
@@ -43,10 +53,17 @@ elseif(WIN32)
   target_link_libraries(noland_moonlight PRIVATE d3d11 dxgi mf mfplat mfuuid ole32 user32 gdi32)
 endif()
 
-find_path(OPUS_INCLUDE_DIR opus/opus_multistream.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS})
-find_library(OPUS_LIBRARY opus HINTS ${NOLAND_NATIVE_LIB_HINTS})
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  set(OPUS_INCLUDE_DIR "${opus_SOURCE_DIR}/include")
+  set(OPUS_LIBRARY_TARGET opus)
+else()
+  find_path(OPUS_INCLUDE_DIR opus/opus_multistream.h HINTS ${NOLAND_NATIVE_INCLUDE_HINTS})
+  find_library(OPUS_LIBRARY opus HINTS ${NOLAND_NATIVE_LIB_HINTS})
+endif()
 
-if(WIN32)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  # The source-built target is linked below.
+elseif(WIN32)
   if(OPUS_INCLUDE_DIR AND OPUS_LIBRARY)
     set(OPUS_LIBRARY_TARGET ${OPUS_LIBRARY})
   else()
@@ -86,13 +103,40 @@ target_include_directories(noland_moonlight
 
 target_compile_features(noland_moonlight PRIVATE c_std_11)
 set_target_properties(noland_moonlight PROPERTIES POSITION_INDEPENDENT_CODE ON)
-if(WIN32)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  target_link_libraries(noland_moonlight PRIVATE moonlight-common-c ${OPUS_LIBRARY_TARGET})
+elseif(WIN32)
   target_link_libraries(noland_moonlight PRIVATE moonlight-common-c ${OPUS_LIBRARY_TARGET})
 else()
   target_link_libraries(noland_moonlight PRIVATE moonlight-common-c ${OPUS_LIBRARY})
 endif()
 
-if(APPLE)
+if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  find_library(UIKIT_FRAMEWORK UIKit REQUIRED)
+  find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
+  find_library(AUDIOTOOLBOX_FRAMEWORK AudioToolbox REQUIRED)
+  find_library(COREMEDIA_FRAMEWORK CoreMedia REQUIRED)
+  find_library(COREVIDEO_FRAMEWORK CoreVideo REQUIRED)
+  find_library(QUARTZCORE_FRAMEWORK QuartzCore REQUIRED)
+  find_library(GAMECONTROLLER_FRAMEWORK GameController REQUIRED)
+  find_library(COREHAPTICS_FRAMEWORK CoreHaptics REQUIRED)
+  target_link_libraries(noland_moonlight PRIVATE
+    ${UIKIT_FRAMEWORK}
+    ${AVFOUNDATION_FRAMEWORK}
+    ${AUDIOTOOLBOX_FRAMEWORK}
+    ${COREMEDIA_FRAMEWORK}
+    ${COREVIDEO_FRAMEWORK}
+    ${QUARTZCORE_FRAMEWORK}
+    ${GAMECONTROLLER_FRAMEWORK}
+    ${COREHAPTICS_FRAMEWORK}
+  )
+  set_source_files_properties(
+    src/noland_video_renderer_ios.m
+    src/noland_audio_renderer_ios.m
+    src/noland_microphone_ios.m
+    PROPERTIES COMPILE_FLAGS "-fobjc-arc"
+  )
+elseif(APPLE)
   find_library(APPKIT_FRAMEWORK AppKit REQUIRED)
   find_library(AVFOUNDATION_FRAMEWORK AVFoundation REQUIRED)
   find_library(COREMEDIA_FRAMEWORK CoreMedia REQUIRED)

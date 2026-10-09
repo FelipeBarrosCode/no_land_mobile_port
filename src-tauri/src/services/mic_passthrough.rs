@@ -10,11 +10,9 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 
 use crate::errors::{AppError, AppResult};
-use crate::mic_client::{
-    self,
-    device_list::{list_devices as list_sidecar_devices, MicrophoneDevice},
-    MicClientConfig, MicClientHandle,
-};
+#[cfg(not(target_os = "ios"))]
+use crate::mic_client::{self, device_list::list_devices as list_sidecar_devices, MicClientHandle};
+use crate::mic_client::{device_list::MicrophoneDevice, MicClientConfig};
 use crate::models::app_state::{
     InstanceMicConfig, InstanceMicRuntimeStatus, MicQualityProfile, MicSessionResponse,
     MicSettingsUpdate, MicState,
@@ -61,16 +59,118 @@ struct MicSession {
 /// for native microphone passthrough to provisioned instances.
 
 pub struct ActiveMicPipeline {
+    #[cfg(not(target_os = "ios"))]
     client: MicClientHandle,
 }
 
 impl ActiveMicPipeline {
     pub fn stop(&mut self) {
+        #[cfg(not(target_os = "ios"))]
         self.client.stop();
+        #[cfg(target_os = "ios")]
+        super::ios_platform::stop_microphone();
     }
 
     pub fn is_running(&mut self) -> bool {
-        self.client.is_running()
+        #[cfg(not(target_os = "ios"))]
+        {
+            return self.client.is_running();
+        }
+        #[cfg(target_os = "ios")]
+        {
+            super::ios_platform::microphone_status().running
+        }
+    }
+
+    fn select_device(&mut self, device_id: Option<&str>) -> AppResult<()> {
+        #[cfg(not(target_os = "ios"))]
+        return self.client.select_device(device_id).map(|_| ());
+        #[cfg(target_os = "ios")]
+        if device_id.is_none() || device_id == Some("default") {
+            Ok(())
+        } else {
+            Err(AppError::InvalidInput(
+                "iOS exposes its current system microphone rather than persistent hardware IDs."
+                    .into(),
+            ))
+        }
+    }
+
+    fn set_bitrate(&mut self, bitrate_bps: u32) -> AppResult<()> {
+        #[cfg(not(target_os = "ios"))]
+        return self.client.set_bitrate(bitrate_bps).map(|_| ());
+        #[cfg(target_os = "ios")]
+        super::ios_platform::set_microphone_bitrate(bitrate_bps)
+    }
+
+    fn set_muted(&mut self, muted: bool) -> AppResult<()> {
+        #[cfg(not(target_os = "ios"))]
+        return self.client.set_muted(muted).map(|_| ());
+        #[cfg(target_os = "ios")]
+        {
+            super::ios_platform::set_microphone_muted(muted);
+            Ok(())
+        }
+    }
+
+    fn metrics(&mut self) -> AppResult<serde_json::Value> {
+        #[cfg(not(target_os = "ios"))]
+        return self.client.metrics();
+        #[cfg(target_os = "ios")]
+        {
+            let status = super::ios_platform::microphone_status();
+            Ok(serde_json::json!({
+                "capturedSamples": status.captured_samples,
+                "opusPacketsSent": status.encoded_packets,
+                "bytesSent": status.sent_bytes,
+                "overruns": status.dropped_samples,
+                "rtcpReports": status.rtcp_reports,
+                "networkErrors": status.network_errors,
+                "ringDepthSamples": status.queue_depth_samples,
+                "appsrcQueueMs": 0,
+                "running": status.running,
+                "suspended": status.suspended,
+                "muted": status.muted,
+            }))
+        }
+    }
+
+    fn status(&mut self) -> AppResult<serde_json::Value> {
+        #[cfg(not(target_os = "ios"))]
+        return self.client.status();
+        #[cfg(target_os = "ios")]
+        {
+            let status = super::ios_platform::microphone_status();
+            Ok(serde_json::json!({
+                "health": if status.running && !status.suspended { "healthy" } else { "stopped" },
+                "sessionActive": status.running,
+                "muted": status.muted,
+                "activeSampleRate": 48_000,
+                "lastError": if status.network_errors > 0 { Some("iOS microphone network errors were observed") } else { None },
+            }))
+        }
+    }
+}
+
+fn start_local_mic_pipeline(config: MicClientConfig) -> AppResult<ActiveMicPipeline> {
+    #[cfg(not(target_os = "ios"))]
+    {
+        return mic_client::start_pipeline(config).map(|client| ActiveMicPipeline { client });
+    }
+    #[cfg(target_os = "ios")]
+    {
+        super::ios_platform::start_microphone(
+            &config.remote_host,
+            config.rtp_port,
+            config.rtcp_port,
+            config.local_rtcp_port,
+            config.ssrc,
+            config.sequence_offset,
+            config.timestamp_offset,
+            config.quality_profile.bitrate_kbps() * 1000,
+            config.quality_profile.frame_ms(),
+        )?;
+        Ok(ActiveMicPipeline {})
     }
 }
 
@@ -83,7 +183,16 @@ pub struct MicPassthroughService;
 impl MicPassthroughService {
     /// List available recording devices on this machine.
     pub fn list_devices() -> AppResult<Vec<MicrophoneDevice>> {
-        list_sidecar_devices()
+        #[cfg(not(target_os = "ios"))]
+        return list_sidecar_devices();
+        #[cfg(target_os = "ios")]
+        Ok(vec![MicrophoneDevice {
+            id: "default".into(),
+            name: "iPhone or iPad Microphone".into(),
+            is_default: true,
+            sample_rates: vec![48_000],
+            channels: 1,
+        }])
     }
 
     /// Get mic configuration for an instance.
@@ -184,10 +293,8 @@ impl MicPassthroughService {
                         "Microphone session exists without an active media sidecar".to_string(),
                     )
                 })?;
-                handle.client.select_device(active_device_id.as_deref())?;
-                handle
-                    .client
-                    .set_bitrate(quality_profile.bitrate_kbps() * 1000)?;
+                handle.select_device(active_device_id.as_deref())?;
+                handle.set_bitrate(quality_profile.bitrate_kbps() * 1000)?;
             }
             if let Some(session) = get_mic_sessions().write().await.get_mut(&instance_id) {
                 session.client_config.device_id = active_device_id;
@@ -258,6 +365,7 @@ impl MicPassthroughService {
                 .await?;
         }
 
+        #[cfg(not(target_os = "ios"))]
         mic_client::ensure_microphone_access()?;
 
         let selected_device_id = normalize_device_id(&persisted_config.device_id);
@@ -341,16 +449,15 @@ impl MicPassthroughService {
             rtcp_port: endpoint.rtcp_port,
             local_rtcp_port,
         };
-        let client = match mic_client::start_pipeline(pipeline_config.clone()) {
-            Ok(client) => client,
+        let handle = match start_local_mic_pipeline(pipeline_config.clone()) {
+            Ok(handle) => handle,
             Err(error) => {
                 let _ = Self::call_vm_agent_stop_session(&remote, &target_user, &session_id).await;
                 return Err(AppError::Provisioning(format!(
-                    "Failed to start local microphone sidecar: {error}"
+                    "Failed to start local microphone capture: {error}"
                 )));
             }
         };
-        let handle = ActiveMicPipeline { client };
         {
             let mut handles = get_mic_handles().lock();
             if let Some(mut previous) = handles.insert(instance_id, handle) {
@@ -553,9 +660,8 @@ impl MicPassthroughService {
                 stale.stop();
             }
 
-            match mic_client::start_pipeline(client_config) {
-                Ok(client) => {
-                    let mut replacement = ActiveMicPipeline { client };
+            match start_local_mic_pipeline(client_config) {
+                Ok(mut replacement) => {
                     let session_still_active = get_mic_sessions()
                         .read()
                         .await
@@ -599,7 +705,7 @@ impl MicPassthroughService {
                 "Microphone forwarding is not active for this instance.".to_string(),
             )
         })?;
-        handle.client.set_muted(muted)?;
+        handle.set_muted(muted)?;
         Ok(())
     }
 
@@ -612,7 +718,7 @@ impl MicPassthroughService {
             )
         })?;
 
-        handle.client.metrics()
+        handle.metrics()
     }
 
     /// Recreate the Cloud Mic device on the VM.
@@ -659,7 +765,7 @@ impl MicPassthroughService {
                         status.error =
                             Some("Noland microphone media sidecar is not running".to_string());
                     } else {
-                        match handle.client.status() {
+                        match handle.status() {
                             Ok(sidecar_status) => {
                                 status.sidecar_healthy = sidecar_status
                                     .get("health")
@@ -688,7 +794,7 @@ impl MicPassthroughService {
                                 status.error = Some(error.to_string());
                             }
                         }
-                        if let Ok(metrics) = handle.client.metrics() {
+                        if let Ok(metrics) = handle.metrics() {
                             status.capture_overruns = metrics
                                 .get("overruns")
                                 .and_then(serde_json::Value::as_u64)
@@ -1140,6 +1246,15 @@ fn resolved_device_name(device_id: &str, fallback_name: &str) -> String {
     }
 }
 
+#[cfg(target_os = "ios")]
+fn resolve_stored_device(_device_id: &str, _fallback_name: &str) -> (String, String) {
+    (
+        "default".to_string(),
+        "iPhone or iPad Microphone".to_string(),
+    )
+}
+
+#[cfg(not(target_os = "ios"))]
 fn resolve_stored_device(device_id: &str, fallback_name: &str) -> (String, String) {
     if device_id == "default" {
         return ("default".to_string(), "System Default".to_string());

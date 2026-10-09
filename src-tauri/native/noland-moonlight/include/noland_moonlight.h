@@ -226,6 +226,19 @@ typedef struct nl_stats {
   nl_pacing_mode_t effective_pacing_mode;
 } nl_stats_t;
 
+typedef struct nl_microphone_statistics {
+  uint64_t captured_samples;
+  uint64_t encoded_packets;
+  uint64_t sent_bytes;
+  uint64_t dropped_samples;
+  uint64_t rtcp_reports;
+  uint64_t network_errors;
+  uint32_t queue_depth_samples;
+  uint8_t running;
+  uint8_t suspended;
+  uint8_t muted;
+} nl_microphone_statistics_t;
+
 nl_result_t nl_runtime_create(nl_runtime_t** output);
 void nl_runtime_destroy(nl_runtime_t* runtime);
 const char* nl_runtime_version_string(void);
@@ -258,6 +271,25 @@ nl_result_t nl_send_horizontal_scroll(nl_runtime_t* runtime, int16_t amount, boo
 nl_result_t nl_send_keyboard(nl_runtime_t* runtime, uint16_t virtual_key, bool pressed, uint8_t modifiers);
 nl_result_t nl_send_controller_arrival(nl_runtime_t* runtime, uint8_t controller_number, uint16_t active_gamepad_mask, uint8_t controller_type, uint32_t supported_button_flags, uint16_t capabilities);
 nl_result_t nl_send_controller_state(nl_runtime_t* runtime, int16_t controller_number, int16_t active_gamepad_mask, int32_t button_flags, uint8_t left_trigger, uint8_t right_trigger, int16_t left_stick_x, int16_t left_stick_y, int16_t right_stick_x, int16_t right_stick_y);
+nl_result_t nl_send_utf8_text(nl_runtime_t* runtime, const char* text, uint32_t length);
+nl_result_t nl_send_touch(nl_runtime_t* runtime, uint8_t event_type, uint32_t pointer_id,
+                          float x, float y, float pressure, uint16_t rotation);
+nl_result_t nl_send_controller(nl_runtime_t* runtime, uint16_t controller_number,
+                               uint16_t active_gamepad_mask, uint32_t button_flags,
+                               uint8_t left_trigger, uint8_t right_trigger,
+                               int16_t left_stick_x, int16_t left_stick_y,
+                               int16_t right_stick_x, int16_t right_stick_y);
+nl_result_t nl_release_all_input(nl_runtime_t* runtime);
+
+int nl_microphone_start(const char* host, uint16_t rtp_port,
+                        uint16_t rtcp_port, uint16_t local_rtcp_port,
+                        uint32_t ssrc, uint16_t sequence_offset,
+                        uint32_t timestamp_offset, uint32_t bitrate_bps,
+                        uint32_t frame_ms);
+void nl_microphone_stop(void);
+void nl_microphone_set_muted(bool muted);
+int nl_microphone_set_bitrate(uint32_t bitrate_bps);
+void nl_microphone_get_statistics(nl_microphone_statistics_t* statistics);
 
 #ifdef __cplusplus
 }

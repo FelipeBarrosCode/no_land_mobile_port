@@ -43,8 +43,10 @@ fn main() {
     }
 
     let target = env::var("TARGET").expect("TARGET is not set");
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let is_ios = target_os == "ios";
 
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {
+    if is_ios {
         println!("cargo:rerun-if-changed=apple/NolandPlatform.m");
         cc::Build::new()
             .file("apple/NolandPlatform.m")
@@ -52,6 +54,9 @@ fn main() {
             .compile("noland_ios_platform");
         println!("cargo:rustc-link-lib=framework=UIKit");
         println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=z");
+        // Swift bridge functions are resolved when Xcode links the final app.
+        println!("cargo:rustc-link-arg-cdylib=-Wl,-undefined,dynamic_lookup");
     }
 
     if matches!(env::var("NOLAND_SKIP_NATIVE_BUILD").as_deref(), Ok("1")) {
@@ -68,9 +73,11 @@ fn main() {
         return;
     }
 
-    prepare_gstreamer_bundle(&target).expect("failed to prepare bundled GStreamer runtime");
-    ensure_managed_sidecar_bundle_artifacts()
-        .expect("failed to prepare managed tool sidecar bundle artifacts");
+    if !is_ios {
+        prepare_gstreamer_bundle(&target).expect("failed to prepare bundled GStreamer runtime");
+        ensure_managed_sidecar_bundle_artifacts()
+            .expect("failed to prepare managed tool sidecar bundle artifacts");
+    }
 
     let native_root = PathBuf::from("native");
     let manifest_dir =
@@ -194,6 +201,14 @@ fn main() {
             .join("noland-moonlight/src/noland_audio_renderer_macos.m")
             .display()
     );
+    for source in [
+        "noland-moonlight/src/noland_video_renderer_ios.m",
+        "noland-moonlight/src/noland_audio_renderer_ios.m",
+        "noland-moonlight/src/noland_microphone_ios.m",
+        "noland-moonlight/src/noland_input_ios.c",
+    ] {
+        println!("cargo:rerun-if-changed={}", native_root.join(source).display());
+    }
 
     println!(
         "cargo:rerun-if-changed={}",
@@ -271,6 +286,8 @@ fn main() {
     let static_lib_dir = dst.join("lib/static");
     let moonlight_common_lib_dir = dst.join("build/moonlight-common-c");
     let enet_lib_dir = dst.join("build/moonlight-common-c/enet");
+    let ios_opus_lib_dir = dst.join("build/_deps/opus-build");
+    let ios_mbedtls_lib_dir = dst.join("build/_deps/mbedtls-build/library");
     let windows_config = if is_windows { Some("Release") } else { None };
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!(
@@ -282,6 +299,10 @@ fn main() {
         moonlight_common_lib_dir.display()
     );
     println!("cargo:rustc-link-search=native={}", enet_lib_dir.display());
+    if is_ios {
+        println!("cargo:rustc-link-search=native={}", ios_opus_lib_dir.display());
+        println!("cargo:rustc-link-search=native={}", ios_mbedtls_lib_dir.display());
+    }
     if let Some(config) = windows_config {
         println!(
             "cargo:rustc-link-search=native={}",
@@ -303,6 +324,18 @@ fn main() {
     println!("cargo:rustc-link-lib=static=noland_moonlight");
     println!("cargo:rustc-link-lib=static=moonlight-common-c");
     println!("cargo:rustc-link-lib=static=enet");
+    if is_ios {
+        println!("cargo:rustc-link-lib=static=opus");
+        println!("cargo:rustc-link-lib=static=mbedcrypto");
+        println!("cargo:rustc-link-lib=framework=UIKit");
+        println!("cargo:rustc-link-lib=framework=AVFoundation");
+        println!("cargo:rustc-link-lib=framework=AudioToolbox");
+        println!("cargo:rustc-link-lib=framework=CoreMedia");
+        println!("cargo:rustc-link-lib=framework=CoreVideo");
+        println!("cargo:rustc-link-lib=framework=QuartzCore");
+        println!("cargo:rustc-link-lib=framework=GameController");
+        println!("cargo:rustc-link-lib=framework=CoreHaptics");
+    }
     if is_macos {
         cc::Build::new()
             .file("src/moonlight/platform/macos_stream_input.m")
@@ -427,6 +460,21 @@ pub struct nl_performance_stats_t {
     pub height: u32,
     pub video_format: u32,
     pub samples: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Default)]
+pub struct nl_microphone_statistics_t {
+    pub captured_samples: u64,
+    pub encoded_packets: u64,
+    pub sent_bytes: u64,
+    pub dropped_samples: u64,
+    pub rtcp_reports: u64,
+    pub network_errors: u64,
+    pub queue_depth_samples: u32,
+    pub running: u8,
+    pub suspended: u8,
+    pub muted: u8,
 }
 
 pub type nl_stream_state_t = ::std::os::raw::c_uint;
@@ -657,6 +705,15 @@ unsafe extern "C" {
     pub fn nl_send_keyboard(runtime: *mut nl_runtime_t, virtual_key: u16, pressed: bool, modifiers: u8) -> nl_result_t;
     pub fn nl_send_controller_arrival(runtime: *mut nl_runtime_t, controller_number: u8, active_gamepad_mask: u16, controller_type: u8, supported_button_flags: u32, capabilities: u16) -> nl_result_t;
     pub fn nl_send_controller_state(runtime: *mut nl_runtime_t, controller_number: i16, active_gamepad_mask: i16, button_flags: i32, left_trigger: u8, right_trigger: u8, left_stick_x: i16, left_stick_y: i16, right_stick_x: i16, right_stick_y: i16) -> nl_result_t;
+    pub fn nl_send_utf8_text(runtime: *mut nl_runtime_t, text: *const ::std::os::raw::c_char, length: u32) -> nl_result_t;
+    pub fn nl_send_touch(runtime: *mut nl_runtime_t, event_type: u8, pointer_id: u32, x: f32, y: f32, pressure: f32, rotation: u16) -> nl_result_t;
+    pub fn nl_send_controller(runtime: *mut nl_runtime_t, controller_number: u16, active_gamepad_mask: u16, button_flags: u32, left_trigger: u8, right_trigger: u8, left_stick_x: i16, left_stick_y: i16, right_stick_x: i16, right_stick_y: i16) -> nl_result_t;
+    pub fn nl_release_all_input(runtime: *mut nl_runtime_t) -> nl_result_t;
+    pub fn nl_microphone_start(host: *const ::std::os::raw::c_char, rtp_port: u16, rtcp_port: u16, local_rtcp_port: u16, ssrc: u32, sequence_offset: u16, timestamp_offset: u32, bitrate_bps: u32, frame_ms: u32) -> ::std::os::raw::c_int;
+    pub fn nl_microphone_stop();
+    pub fn nl_microphone_set_muted(muted: bool);
+    pub fn nl_microphone_set_bitrate(bitrate_bps: u32) -> ::std::os::raw::c_int;
+    pub fn nl_microphone_get_statistics(statistics: *mut nl_microphone_statistics_t);
 }
 "#
 }

@@ -18,6 +18,7 @@
     "tauri:ios:build": "npm run configure:ios && tauri ios build --config src-tauri/tauri.mobile.conf.json",
     "check:ios": "node scripts/check-ios.mjs",
     "check:ios:vpn": "npm run configure:ios && xcodebuild -project src-tauri/gen/apple/noland-connect.xcodeproj -scheme NolandPacketTunnelOnly -configuration debug -sdk iphonesimulator -arch arm64 CODE_SIGNING_ALLOWED=NO COMPILER_INDEX_STORE_ENABLE=NO build",
+    "check:ios:streaming": "node scripts/check-ios-streaming.mjs",
     "check:ios:contracts": "node scripts/check-ios-contracts.mjs",
     "test:ssh": "cargo test --locked --manifest-path src-tauri/Cargo.toml -p noland-ssh",
     "tauri:dev": "node scripts/tauri-with-mic-sidecar.mjs dev",

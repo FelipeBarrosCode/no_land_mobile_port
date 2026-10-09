@@ -1,5 +1,6 @@
 {
   "mobile.returnToStream": "스트리밍으로 돌아가기",
+  "mobile.streamStats": "{{fps}} FPS · 디코딩 {{decode}} ms",
   "app.settings": "계정 설정",
   "app.preferences": "옵션 정보",
   "settings.profile": "이름 *",

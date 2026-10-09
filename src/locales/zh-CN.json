@@ -1,5 +1,6 @@
 {
   "mobile.returnToStream": "返回串流",
+  "mobile.streamStats": "{{fps}} FPS · 解码 {{decode}} 毫秒",
   "app.settings": "设置",
   "app.preferences": "首选项",
   "settings.profile": "简介",

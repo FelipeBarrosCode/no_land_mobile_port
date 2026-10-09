@@ -175,7 +175,7 @@ public class WireGuardAdapter {
     ///   - tunnelConfiguration: tunnel configuration.
     ///   - completionHandler: completion handler.
     public func start(tunnelConfiguration: TunnelConfiguration, completionHandler: @escaping (WireGuardAdapterError?) -> Void) {
-        workQueue.async {
+        workQueue.async { [self] in
             guard case .stopped = self.state else {
                 completionHandler(.invalidState)
                 return

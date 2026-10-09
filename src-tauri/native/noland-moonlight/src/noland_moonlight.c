@@ -74,6 +74,9 @@ struct nl_runtime {
   uint64_t keyboard_event_count;
   uint64_t controller_arrival_count;
   uint64_t controller_state_count;
+  bool pressed_mouse_buttons[6];
+  bool pressed_keys[256];
+  uint16_t active_gamepad_mask;
   uint64_t reconnect_attempt_count;
   uint64_t reconnect_success_count;
   uint64_t session_generation;
@@ -1170,6 +1173,9 @@ nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {
       }
       nl_runtime_lock(runtime);
       runtime->mouse_button_count += 1U;
+      if (button < 6U) {
+        runtime->pressed_mouse_buttons[button] = pressed;
+      }
       nl_runtime_unlock(runtime);
       return NL_RESULT_OK;
     }
@@ -1210,6 +1216,9 @@ nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {
       }
       nl_runtime_lock(runtime);
       runtime->keyboard_event_count += 1U;
+      if (virtual_key < 256U) {
+        runtime->pressed_keys[virtual_key] = pressed;
+      }
       nl_runtime_unlock(runtime);
       return NL_RESULT_OK;
     }
@@ -1240,6 +1249,65 @@ nl_result_t nl_runtime_read_stats(nl_runtime_t* runtime, nl_stats_t* output) {
       }
       nl_runtime_lock(runtime);
       runtime->controller_state_count += 1U;
+      runtime->active_gamepad_mask = (uint16_t)active_gamepad_mask;
       nl_runtime_unlock(runtime);
+      return NL_RESULT_OK;
+    }
+
+    nl_result_t nl_send_utf8_text(nl_runtime_t* runtime, const char* text, uint32_t length) {
+      if (!nl_runtime_can_send_input(runtime) || text == NULL) {
+        return NL_RESULT_INVALID_STATE;
+      }
+      return LiSendUtf8TextEvent(text, length) == 0 ? NL_RESULT_OK : NL_RESULT_NOT_READY;
+    }
+
+    nl_result_t nl_send_touch(nl_runtime_t* runtime, uint8_t event_type, uint32_t pointer_id,
+                              float x, float y, float pressure, uint16_t rotation) {
+      if (!nl_runtime_can_send_input(runtime)) {
+        return NL_RESULT_INVALID_STATE;
+      }
+      return LiSendTouchEvent(event_type, pointer_id, x, y, pressure, 0.0f, 0.0f, rotation) == 0
+          ? NL_RESULT_OK
+          : NL_RESULT_NOT_READY;
+    }
+
+    nl_result_t nl_send_controller(nl_runtime_t* runtime, uint16_t controller_number,
+                                   uint16_t active_gamepad_mask, uint32_t button_flags,
+                                   uint8_t left_trigger, uint8_t right_trigger,
+                                   int16_t left_stick_x, int16_t left_stick_y,
+                                   int16_t right_stick_x, int16_t right_stick_y) {
+      return nl_send_controller_state(runtime, (int16_t)controller_number,
+                                      (int16_t)active_gamepad_mask, (int32_t)button_flags,
+                                      left_trigger, right_trigger, left_stick_x, left_stick_y,
+                                      right_stick_x, right_stick_y);
+    }
+
+    nl_result_t nl_release_all_input(nl_runtime_t* runtime) {
+      int key;
+      int button;
+      if (runtime == NULL) {
+        return NL_RESULT_INVALID_ARGUMENT;
+      }
+      if (nl_runtime_can_send_input(runtime)) {
+        for (button = 1; button < 6; button++) {
+          if (runtime->pressed_mouse_buttons[button]) {
+            (void)LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, button);
+          }
+        }
+        for (key = 0; key < 256; key++) {
+          if (runtime->pressed_keys[key]) {
+            (void)LiSendKeyboardEvent((short)key, KEY_ACTION_UP, 0);
+          }
+        }
+        for (key = 0; key < 16; key++) {
+          if ((runtime->active_gamepad_mask & (1U << key)) != 0U) {
+            (void)LiSendMultiControllerEvent((short)key, 0, 0, 0, 0, 0, 0, 0, 0);
+          }
+        }
+        (void)LiSendTouchEvent(LI_TOUCH_EVENT_CANCEL_ALL, 0, 0, 0, 0, 0, 0, LI_ROT_UNKNOWN);
+      }
+      memset(runtime->pressed_mouse_buttons, 0, sizeof(runtime->pressed_mouse_buttons));
+      memset(runtime->pressed_keys, 0, sizeof(runtime->pressed_keys));
+      runtime->active_gamepad_mask = 0;
       return NL_RESULT_OK;
     }

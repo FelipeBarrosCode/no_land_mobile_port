@@ -1,5 +1,6 @@
 {
   "mobile.returnToStream": "ストリーミングに戻る",
+  "mobile.streamStats": "{{fps}} FPS · デコード {{decode}} ms",
   "app.settings": "コンテンツ",
   "app.preferences": "リファレンス",
   "settings.profile": "プロフィール",
