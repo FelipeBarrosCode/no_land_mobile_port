@@ -1070,8 +1070,20 @@ fn build_windows_tunnel_launch_script(helper: &str, arguments: &[String]) -> Str
 }
 
 fn launch_managed_gotatun_helper(config_path: &Path, launch_id: &str) -> AppResult<()> {
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (config_path, launch_id);
+        return Err(AppError::State(
+            "The desktop tunnel helper cannot run on iOS; the Network Extension adapter must be used"
+                .into(),
+        ));
+    }
+
+    #[cfg(not(target_os = "ios"))]
     let helper = resolve_noland_net_helper_binary()?;
+    #[cfg(not(target_os = "ios"))]
     let runtime_dir = gotatun_runtime_dir(config_path);
+    #[cfg(not(target_os = "ios"))]
     std::fs::create_dir_all(&runtime_dir).map_err(|error| {
         AppError::Command(format!(
             "Failed creating managed GotaTun runtime directory {}: {error}",
@@ -1181,14 +1193,10 @@ fn launch_managed_gotatun_helper(config_path: &Path, launch_id: &str) -> AppResu
         return Ok(());
     }
 
-    #[cfg(target_os = "ios")]
-    {
-        let _ = (helper, runtime_dir, launch_id);
-        Err(AppError::State(
-            "The desktop tunnel helper cannot run on iOS; the Network Extension adapter must be used"
-                .into(),
-        ))
-    }
+    #[allow(unreachable_code)]
+    Err(AppError::State(
+        "No managed desktop tunnel launcher is available for this platform".into(),
+    ))
 }
 
 fn wait_for_managed_gotatun_start(
@@ -1657,6 +1665,7 @@ impl WireGuardService {
         server_listen_port: u16,
         mode: WireGuardProvisionMode,
     ) -> AppResult<WireGuardProvisionResult> {
+        #[cfg(not(target_os = "ios"))]
         ensure_local_wireguard_tools()?;
 
         let local_config_path = instance_local_config_path(local_app_data_dir, instance_id);
