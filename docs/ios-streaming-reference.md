@@ -20,8 +20,9 @@ Moonlight iOS is GPL-3.0, compatible with this repository's GPL-3.0-only license
 ## Native stream controls (2026-10-09)
 
 `noland_stream_controls_ios.m` implements No Land's requested in-stream drawer.
-Swipe left-to-right from the left edge/safe-area strip, tap with three fingers on the video, or use the
-44-point menu button. The drawer can be dragged closed or dismissed via its
+Swipe left-to-right from the left edge/safe-area strip or use the 44-point menu
+button. A three-finger tap outside the edge strip opens the keyboard instead of
+the drawer. The drawer can be dragged closed or dismissed via its
 scrim/Resume action. It scrolls within safe areas on smaller displays.
 
 - **Trackpad:** relative movement, tap left-click, hold then drag, two-finger
@@ -51,9 +52,9 @@ held keys, sticks, and buttons are released on cancellation, focus loss, dismiss
 and stream teardown. Delayed click releases use the owning live view/runtime,
 not a global event that could reach a later session.
 
-The upstream iOS reference uses three-finger input for the keyboard. The drawer
-gesture here is the user's requested No Land adaptation, not a claim that the
-pinned upstream version has an identical menu.
+The three-finger keyboard gesture follows the upstream iOS reference. The edge
+drawer is the user's requested No Land adaptation, not a claim that the pinned
+upstream version has an identical menu.
 
 Verified: native iOS streaming compile, signed iPhone build/export, and the
 standalone `tests/ios_keyboard_test.c` regression (all printable ASCII, letter

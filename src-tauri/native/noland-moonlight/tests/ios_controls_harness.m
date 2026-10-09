@@ -3,6 +3,10 @@
 #import "noland_stream_controls_ios.h"
 #include "Limelight.h"
 
+@interface NolandStreamControls (Harness)
+- (void)requestKeyboard;
+@end
+
 static UIView* findLabel(UIView* root, NSString* label) {
   if ([root.accessibilityLabel isEqualToString:label]) return root;
   for (UIView* child in root.subviews) {
@@ -70,6 +74,9 @@ static UIView* findLabel(UIView* root, NSString* label) {
     NSCAssert(![controls gestureRecognizer:gesture shouldReceiveTouch:touch], @"Menu gestures must not steal gamepad touches");
   }
   NSCAssert(keyboardRequests == 0, @"Gamepad input must never request the keyboard");
+  [controls requestKeyboard];
+  NSCAssert(keyboardRequests == 1, @"Three-finger keyboard action must request the keyboard without opening the drawer");
+  NSCAssert(!controls.menuVisible, @"Keyboard action must not open the drawer");
   [controls toggleMenu];
   NSCAssert(state.buttons == 0 && state.leftTrigger == 0 && state.leftX == 0, @"Opening drawer releases held controls");
   UIView* hit = [self.view hitTest:aPoint withEvent:nil];

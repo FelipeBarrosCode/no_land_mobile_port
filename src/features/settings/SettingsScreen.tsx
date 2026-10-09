@@ -8,6 +8,7 @@ import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
+import { MobileMenuButton, MobileSideMenu } from "../../components/ui/MobileSideMenu";
 import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettingsV2";
 import { AutoShutdownSettings } from "./AutoShutdownSettings";
 import { NotificationSettings } from "./NotificationSettings";
@@ -258,6 +259,7 @@ export function SettingsScreen({
   const [section, setSection] = useState<SettingsSection>(() =>
     searchParams.get("section") === "storage" ? "storage" : "profile",
   );
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [apiKey, setApiKey] = useState(appState.credentials.vastApiKey);
   const [platformUsername, setPlatformUsername] = useState(
     appState.credentials.appUsername,
@@ -1398,7 +1400,7 @@ export function SettingsScreen({
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
                     <select
-                      className="min-w-52 rounded border border-[#48527a] bg-[#111936] px-3 py-2 text-[1rem] text-white"
+                      className="w-full min-w-0 rounded border border-[#48527a] bg-[#111936] px-3 py-2 text-[1rem] text-white sm:w-auto sm:min-w-52"
                       value={network.preference}
                       disabled={busy || switchingInstanceId === server.instanceId || !status}
                       onChange={(event) =>
@@ -1484,8 +1486,33 @@ export function SettingsScreen({
                 ? languagePanel
                 : clientPanel;
 
+  const sectionButtons = (closeAfterSelection: boolean) => (
+    <div className="grid gap-2">
+      {([
+        ["profile", t("settings.profile")],
+        ["server", t("settings.server")],
+        ["client", t("settings.client")],
+        ["storage", t("settings.storage")],
+        ["connection", t("settings.connection")],
+        ["notifications", t("settings.notifications")],
+        ["language", t("settings.language")],
+      ] as const).map(([value, label]) => (
+        <Button
+          key={value}
+          variant={section === value ? "secondary" : "ghost"}
+          onClick={() => {
+            setSection(value);
+            if (closeAfterSelection) setMobileMenuOpen(false);
+          }}
+        >
+          {label}
+        </Button>
+      ))}
+    </div>
+  );
+
   return (
-    <main className="crt-surface min-h-dvh bg-hero-glow px-4 pb-6 pt-6 md:px-8">
+    <main className="crt-surface min-h-dvh bg-hero-glow px-3 pb-6 pt-4 md:px-8 md:pt-6">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-4">
         <div className="flex shrink-0 items-center justify-between gap-4">
           <div className="flex items-center gap-3">
@@ -1500,14 +1527,21 @@ export function SettingsScreen({
                 {t("app.preferences")}
               </h1>
             </div>
-            <AIPromptHelper
-              topic={translate("generated.329d5f59f3636df1")}
-              promptText={APP_PROMPTS.settingsPage}
-              variant="both"
-            />
+            <div className="hidden md:block">
+              <AIPromptHelper
+                topic={translate("generated.329d5f59f3636df1")}
+                promptText={APP_PROMPTS.settingsPage}
+                variant="both"
+              />
+            </div>
           </div>
 
-          <div className="flex items-center gap-2">
+          <MobileMenuButton
+            label={t("app.settings")}
+            onClick={() => setMobileMenuOpen(true)}
+            expanded={mobileMenuOpen}
+          />
+          <div className="hidden items-center gap-2 md:flex">
             <ArcadeSoundToggle />
             <Link to="/">
               <Button variant="ghost">{t("settings.back")}</Button>
@@ -1515,52 +1549,30 @@ export function SettingsScreen({
           </div>
         </div>
 
+        <MobileSideMenu
+          open={mobileMenuOpen}
+          title={t("app.settings")}
+          onClose={() => setMobileMenuOpen(false)}
+        >
+          {sectionButtons(true)}
+          <div className="mt-4 border-t border-[#343b68] pt-4">
+            <AIPromptHelper
+              topic={translate("generated.329d5f59f3636df1")}
+              promptText={APP_PROMPTS.settingsPage}
+              variant="both"
+            />
+          </div>
+          <div className="mt-4 flex items-center justify-between border-t border-[#343b68] pt-4">
+            <ArcadeSoundToggle />
+            <Link to="/" onClick={() => setMobileMenuOpen(false)}>
+              <Button variant="ghost">{t("settings.back")}</Button>
+            </Link>
+          </div>
+        </MobileSideMenu>
+
         <section className="grid items-start gap-4 md:grid-cols-[240px_minmax(0,1fr)]">
-          <Card className="pixel-frame self-start overflow-hidden md:sticky md:top-6">
-            <div className="grid gap-2">
-              <Button
-                variant={section === "profile" ? "secondary" : "ghost"}
-                onClick={() => setSection("profile")}
-              >
-                {t("settings.profile")}
-              </Button>
-              <Button
-                variant={section === "server" ? "secondary" : "ghost"}
-                onClick={() => setSection("server")}
-              >
-                {t("settings.server")}
-              </Button>
-              <Button
-                variant={section === "client" ? "secondary" : "ghost"}
-                onClick={() => setSection("client")}
-              >
-                {t("settings.client")}
-              </Button>
-              <Button
-                variant={section === "storage" ? "secondary" : "ghost"}
-                onClick={() => setSection("storage")}
-              >
-                {t("settings.storage")}
-              </Button>
-              <Button
-                variant={section === "connection" ? "secondary" : "ghost"}
-                onClick={() => setSection("connection")}
-              >
-                {t("settings.connection")}
-              </Button>
-              <Button
-                variant={section === "notifications" ? "secondary" : "ghost"}
-                onClick={() => setSection("notifications")}
-              >
-                {t("settings.notifications")}
-              </Button>
-              <Button
-                variant={section === "language" ? "secondary" : "ghost"}
-                onClick={() => setSection("language")}
-              >
-                {t("settings.language")}
-              </Button>
-            </div>
+          <Card className="pixel-frame hidden self-start overflow-hidden md:sticky md:top-6 md:block">
+            {sectionButtons(false)}
           </Card>
 
           <div className="min-w-0 pr-1">

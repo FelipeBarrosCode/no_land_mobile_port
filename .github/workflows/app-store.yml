@@ -1,0 +1,90 @@
+name: App Store Connect
+
+on:
+  workflow_dispatch:
+    inputs:
+      upload:
+        description: Upload the signed IPA to TestFlight/App Store Connect
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: app-store-connect
+  cancel-in-progress: false
+
+jobs:
+  archive:
+    runs-on: macos-15
+    timeout-minutes: 120
+    environment: app-store
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install project tools
+        run: brew install xcodegen
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Validate release inputs
+        run: npm run check:ios:release
+      - name: Import App Store signing assets
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          APP_PROFILE_BASE64: ${{ secrets.IOS_APP_PROVISIONING_PROFILE_BASE64 }}
+          TUNNEL_PROFILE_BASE64: ${{ secrets.IOS_TUNNEL_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          KEYCHAIN="$RUNNER_TEMP/noland-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
+          echo "$CERTIFICATE_BASE64" | base64 -D > "$RUNNER_TEMP/distribution.p12"
+          echo "$APP_PROFILE_BASE64" | base64 -D > "$RUNNER_TEMP/app.mobileprovision"
+          echo "$TUNNEL_PROFILE_BASE64" | base64 -D > "$RUNNER_TEMP/tunnel.mobileprovision"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/distribution.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
+          security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
+          cp "$RUNNER_TEMP/app.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/app.mobileprovision"
+          cp "$RUNNER_TEMP/tunnel.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/tunnel.mobileprovision"
+      - name: Generate Xcode project and signed App Store IPA
+        run: |
+          npm run tauri:ios:init
+          npm run tauri:ios:build -- --target aarch64 --ci --export-method app-store-connect
+      - name: Locate and verify IPA
+        id: ipa
+        run: |
+          set -euo pipefail
+          IPA="$(find src-tauri/gen/apple/build -type f -name '*.ipa' -print -quit)"
+          test -n "$IPA"
+          echo "path=$IPA" >> "$GITHUB_OUTPUT"
+          unzip -t "$IPA" >/dev/null
+      - uses: actions/upload-artifact@v4
+        with:
+          name: noland-connect-ios-${{ github.sha }}
+          path: ${{ steps.ipa.outputs.path }}
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload to App Store Connect
+        if: ${{ inputs.upload }}
+        env:
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+          IPA_PATH: ${{ steps.ipa.outputs.path }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.appstoreconnect/private_keys"
+          printf '%s' "$APPSTORE_PRIVATE_KEY" > "$HOME/.appstoreconnect/private_keys/AuthKey_${APPSTORE_KEY_ID}.p8"
+          xcrun altool --upload-app --type ios --file "$IPA_PATH" --apiKey "$APPSTORE_KEY_ID" --apiIssuer "$APPSTORE_ISSUER_ID"

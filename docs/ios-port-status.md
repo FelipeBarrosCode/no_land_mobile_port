@@ -8,6 +8,11 @@ of the broader network lifecycle/TURN matrix. Current input work adds the native
 stream drawer, selectable touch modes, on-screen controller and keyboard fixes;
 see [stream controls](ios-streaming-reference.md#native-stream-controls-2026-10-09).
 
+App Store preparation now includes opaque iOS icons, a privacy manifest, release
+preflight validation, pull-request CI, and a protected signed archive/upload
+workflow. Apple account, entitlement, signing, listing, privacy, and review tasks
+are documented in [App Store release setup](app-store-release.md).
+
 See [the network pipeline audit](ios-network-audit.md) for device evidence,
 connected-path corrections and outstanding parity gaps. Initial iOS VPN
 activation/handshake has passed on-device; full MTU, Direct/TURN and lifecycle

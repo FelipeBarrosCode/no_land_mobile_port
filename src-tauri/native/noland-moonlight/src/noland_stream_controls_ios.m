@@ -197,7 +197,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   }
   self.menuButton = [self button:@"☰" action:@selector(toggleMenu)];
   self.menuButton.accessibilityLabel = NSLocalizedString(@"Open stream menu", nil);
-  self.menuButton.accessibilityHint = NSLocalizedString(@"Also opens with three fingers or a swipe from the left edge", nil);
+  self.menuButton.accessibilityHint = NSLocalizedString(@"Also opens by swiping right from the left edge", nil);
   [self addSubview:self.menuButton];
   [self updateModeLabels];
   [self setDrawerProgress:0];
@@ -226,7 +226,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   self.edgePan.delaysTouchesBegan = YES;
   self.edgePan.allowedTouchTypes = @[@(UITouchTypeDirect)];
   [view addGestureRecognizer:self.edgePan];
-  self.threeFingerTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(toggleMenu)];
+  self.threeFingerTap = [[UITapGestureRecognizer alloc] initWithTarget:self action:@selector(requestKeyboard)];
   self.threeFingerTap.numberOfTouchesRequired = 3;
   self.threeFingerTap.delegate = self;
   self.threeFingerTap.delaysTouchesBegan = YES;
@@ -239,7 +239,9 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
     if ([touch.view isDescendantOfView:self]) return NO;
     if (gesture == self.edgePan)
       return !self.menuVisible && [touch locationInView:self].x <= MAX(44, self.safeAreaInsets.left + 24);
-    return YES;
+    // Three fingers away from the edge are reserved for the keyboard. The edge
+    // strip remains dedicated to the drawer gesture.
+    return [touch locationInView:self].x > MAX(44, self.safeAreaInsets.left + 24);
   }
   for (UIView* view = touch.view; view && view != self.drawer; view = view.superview)
     if ([view isKindOfClass:UIControl.class]) return NO;
@@ -281,6 +283,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   }];
 }
 - (void)toggleMenu { [self setMenuOpen:!self.menuVisible animated:YES]; }
+- (void)requestKeyboard { if (!self.menuVisible && self.keyboardRequested) self.keyboardRequested(); }
 - (void)closeMenu { [self setMenuOpen:NO animated:YES]; }
 - (void)dragDrawer:(UIPanGestureRecognizer*)gesture {
   CGFloat width = MIN(340, self.bounds.size.width * 0.8);

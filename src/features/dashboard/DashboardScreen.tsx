@@ -11,6 +11,7 @@ import { Card } from "../../components/ui/Card";
 import { HudBar } from "../../components/ui/HudBar";
 import { MicControls } from "../../components/ui/MicControls";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
+import { MobileMenuButton, MobileSideMenu } from "../../components/ui/MobileSideMenu";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
 import { StatusPill } from "../../components/ui/StatusPill";
 import { SocialLinks } from "../../components/ui/SocialLinks";
@@ -231,6 +232,7 @@ export function DashboardScreen({
   const [connectionInfoModalType, setConnectionInfoModalType] = useState<
     "wireguard" | null
   >(null);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const navigate = useNavigate();
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
@@ -426,7 +428,7 @@ export function DashboardScreen({
   return (
     <main className="crt-surface min-h-dvh bg-hero-glow px-4 pb-8 pt-6 md:px-8">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-8">
-        <header className="flex flex-wrap items-center justify-between gap-4">
+        <header className="flex items-center justify-between gap-3">
           <div>
             <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
               {translate("generated.939edfedc701440a")}
@@ -439,7 +441,12 @@ export function DashboardScreen({
             </h1>
           </div>
 
-          <div className="flex flex-wrap items-center justify-end gap-2">
+          <MobileMenuButton
+            label={translate("generated.74a883a037bc227f")}
+            onClick={() => setMobileMenuOpen(true)}
+            expanded={mobileMenuOpen}
+          />
+          <div className="hidden flex-wrap items-center justify-end gap-2 md:flex">
             <SocialLinks />
             <Button
               variant={systemHealth?.ok === false ? "danger" : "secondary"}
@@ -466,6 +473,40 @@ export function DashboardScreen({
             <ArcadeSoundToggle />
           </div>
         </header>
+
+        <MobileSideMenu
+          open={mobileMenuOpen}
+          title={translate("generated.5abdf7d9b9336afa")}
+          onClose={() => setMobileMenuOpen(false)}
+        >
+          <div className="grid gap-3">
+            <Button
+              variant={systemHealth?.ok === false ? "danger" : "secondary"}
+              onClick={() => { setMobileMenuOpen(false); void handleHealthClick(); }}
+              loading={healthChecking}
+              loadingText={translate("generated.2e5f79bb94a8c40b")}
+            >
+              {systemHealth?.ok === false ? "✕" : "✓"} {translate("generated.55898449eb74fb2e")}
+            </Button>
+            <Button variant="ghost" onClick={() => { setMobileMenuOpen(false); setWalletModalOpen(true); }}>
+              {translate("generated.d1c9a01d57e90086")} {walletAmountLabel}
+            </Button>
+            <Button variant="ghost" onClick={() => { setMobileMenuOpen(false); openTutorial(); }}>
+              <SpriteIcon icon="help" />
+              <span className="ml-1">{translate("generated.b79cac926e0b2e34")}</span>
+            </Button>
+            <Button variant="ghost" onClick={() => { setMobileMenuOpen(false); navigate("/settings"); }}>
+              {translate("generated.74a883a037bc227f")}
+            </Button>
+            <Button variant="secondary" onClick={() => { setMobileMenuOpen(false); void openServerPicker(); }}>
+              {translate("generated.7f67df7f92611db8")}
+            </Button>
+            <div className="flex items-center justify-between border-t border-[#343b68] pt-3">
+              <SocialLinks />
+              <ArcadeSoundToggle />
+            </div>
+          </div>
+        </MobileSideMenu>
 
         {showDashboardGuidance ? (
           <section className="grid gap-4 md:grid-cols-3">

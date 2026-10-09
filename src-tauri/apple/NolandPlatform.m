@@ -159,9 +159,19 @@ void noland_ios_stream_dismiss(void) {
 
 void noland_ios_stream_close(void) {
     on_main(^{
-        [streamController dismissViewControllerAnimated:NO completion:nil];
-        streamController = nil;
-        streamRoot = nil;
-        UIApplication.sharedApplication.idleTimerDisabled = NO;
+        NolandStreamController *closingController = streamController;
+        void (^restoreManagementUI)(void) = ^{
+            // Release the native stream hierarchy only after UIKit has completed
+            // dismissal. Releasing it early can leave the presenting web view
+            // without interaction after a host-initiated stream shutdown.
+            if (streamController == closingController) streamController = nil;
+            streamRoot = nil;
+            UIApplication.sharedApplication.idleTimerDisabled = NO;
+        };
+        if (closingController.presentingViewController) {
+            [closingController dismissViewControllerAnimated:NO completion:restoreManagementUI];
+        } else {
+            restoreManagementUI();
+        }
     });
 }

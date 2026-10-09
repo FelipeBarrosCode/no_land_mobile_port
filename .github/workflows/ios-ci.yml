@@ -1,0 +1,44 @@
+name: iOS CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ios-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios,aarch64-apple-ios-sim
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - name: Install project tools
+        run: brew install xcodegen
+      - name: Install JavaScript dependencies
+        run: npm ci
+      - name: Validate frontend and release inputs
+        run: |
+          npm run build
+          npm run i18n:check
+          npm run check:ios:release
+      - name: Generate maintained Xcode project
+        run: npm run tauri:ios:init
+      - name: Compile iOS contracts and streaming backend
+        run: |
+          npm run check:ios:contracts
+          npm run check:ios:streaming
+      - name: Compile packet tunnel for Simulator
+        run: npm run check:ios:vpn
