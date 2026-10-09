@@ -9,6 +9,14 @@ private struct UpdateRequest: Decodable {
     let expectedConfigFingerprint: String
     let configFingerprint: String
     let transitionID: UUID
+
+    private enum CodingKeys: String, CodingKey {
+        case configurationReference
+        case configuration
+        case expectedConfigFingerprint
+        case configFingerprint
+        case transitionID = "transitionId"
+    }
 }
 
 final class PacketTunnelProvider: NEPacketTunnelProvider {

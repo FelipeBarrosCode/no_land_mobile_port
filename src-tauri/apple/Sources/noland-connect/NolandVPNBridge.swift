@@ -12,6 +12,15 @@ private struct InstallRequest: Decodable {
     let instanceID: UInt64
     let launchID: String
     let configFingerprint: String
+
+    private enum CodingKeys: String, CodingKey {
+        case configurationReference
+        case configuration
+        case operationID = "operationId"
+        case instanceID = "instanceId"
+        case launchID = "launchId"
+        case configFingerprint
+    }
 }
 private struct ReferenceRequest: Codable { let configurationReference: String }
 private struct UpdateRequest: Codable {
@@ -20,6 +29,14 @@ private struct UpdateRequest: Codable {
     let expectedConfigFingerprint: String
     let configFingerprint: String
     let transitionID: UUID
+
+    private enum CodingKeys: String, CodingKey {
+        case configurationReference
+        case configuration
+        case expectedConfigFingerprint
+        case configFingerprint
+        case transitionID = "transitionId"
+    }
 }
 private struct VPNResponse: Encodable {
     let ok: Bool
