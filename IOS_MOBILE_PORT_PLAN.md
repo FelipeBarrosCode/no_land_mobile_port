@@ -8,7 +8,7 @@ The port will preserve the current product workflows, API contracts, state model
 
 **Completion requirement: full behavioral parity with the original application.** Every existing user workflow must have a working iOS implementation. Intermediate milestones are development checkpoints, not a reduced-feature definition of the finished port. A hidden control, unsupported-command error, mock response, or compiling shell does not satisfy parity.
 
-This is a written implementation plan; application code has not yet been ported. The desktop baseline is the source snapshot in commit `b49160a` of this repository. Compare subsequent changes to that baseline and explicitly reconcile upstream changes before claiming parity with a newer original version.
+Implementation is in progress; see [the implementation status](docs/ios-port-status.md) for verified work and remaining blockers. The desktop baseline is the source snapshot in commit `b49160a` of this repository. Compare subsequent changes to that baseline and explicitly reconcile upstream changes before claiming parity with a newer original version.
 
 Behavioral parity means preserving user outcomes, remote effects, options, progress, failure handling, and recovery. Platform mechanisms may differ: an SSH library replaces a local `ssh` process, an in-app stream view replaces a separate desktop window, and App Store/TestFlight replaces desktop self-updating. If iOS cannot reproduce an outcome, record it as a blocking parity gap with evidence and a proposed equivalent; do not silently remove the feature or mark it complete. Scope reductions require an explicit user decision.
 

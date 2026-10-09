@@ -15,11 +15,13 @@ import { OnboardingScreen } from "../features/onboarding/OnboardingScreen";
 import { ProvisioningScreen } from "../features/provisioning/ProvisioningScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
 import { StreamWindowScreen } from "../features/moonlight/StreamWindowScreen";
+import { MobileStreamReturn } from "../features/moonlight/MobileStreamReturn";
 import { useAppStore } from "../store/appStore";
 import appLogo from "../public/noland.png";
 import { moonlightGetSessionState, refreshStateAgentIndex } from "../lib/backend";
 import { buildDiagnosticIssueUrl } from "../lib/githubIssue";
 import { isRunningInTauri } from "../lib/tauri";
+import { isIOS } from "../lib/platform";
 import { notifyInstancesNeedAttention } from "../lib/instanceNotifications";
 
 import {
@@ -590,7 +592,7 @@ export function App() {
   }, [bindEvents, initialize, windowLabel, windowLabelResolved]);
 
   useEffect(() => {
-    if (!windowLabelResolved || windowLabel !== "main" || loading) {
+    if (isIOS || !isRunningInTauri() || !windowLabelResolved || windowLabel !== "main" || loading) {
       return;
     }
 
@@ -672,6 +674,7 @@ export function App() {
   ]);
 
   async function quitWindow() {
+    if (isIOS) return;
     setCloseGuardError(null);
     setCloseGuardOpen(false);
     try {
@@ -905,6 +908,8 @@ export function App() {
           />
         </div>
       )}
+
+      {isIOS && embeddedMoonlightStatus?.runtimeConnected && <MobileStreamReturn />}
 
       <HashRouter>
         <Routes>

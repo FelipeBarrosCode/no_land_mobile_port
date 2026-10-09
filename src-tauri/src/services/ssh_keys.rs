@@ -1,17 +1,20 @@
-use std::{
-    path::{Path, PathBuf},
-    process::{Command, Stdio},
-};
+use std::path::{Path, PathBuf};
+#[cfg(not(target_os = "ios"))]
+use std::process::{Command, Stdio};
 
 use tokio::fs;
 
-use crate::{
-    errors::{AppError, AppResult},
-    utils::{managed_binaries::configure_bundled_linux_runtime, process::configure_no_window},
+use crate::errors::{AppError, AppResult};
+#[cfg(not(target_os = "ios"))]
+use crate::utils::{
+    managed_binaries::configure_bundled_linux_runtime, process::configure_no_window,
 };
 
-use super::{os_detection::OsDetection, vast_api::VastApiClient};
+#[cfg(not(target_os = "ios"))]
+use super::os_detection::OsDetection;
+use super::vast_api::VastApiClient;
 
+#[cfg(not(target_os = "ios"))]
 fn locate_ssh_key_tool(tool: &str) -> Option<PathBuf> {
     let os = OsDetection::new();
 
@@ -26,6 +29,7 @@ fn locate_ssh_key_tool(tool: &str) -> Option<PathBuf> {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 fn resolve_ssh_key_tool(tool: &str) -> AppResult<PathBuf> {
     let os = OsDetection::new();
     locate_ssh_key_tool(tool).ok_or_else(|| {
@@ -54,6 +58,7 @@ impl SshKeyService {
         }
     }
 
+    #[cfg(not(target_os = "ios"))]
     pub async fn ensure_keypair(&self, root_dir: &Path) -> AppResult<SshKeyPaths> {
         let ssh_keygen_bin = resolve_ssh_key_tool("ssh-keygen")?;
 
@@ -129,6 +134,15 @@ impl SshKeyService {
         })
     }
 
+    #[cfg(target_os = "ios")]
+    pub async fn ensure_keypair(&self, root_dir: &Path) -> AppResult<SshKeyPaths> {
+        let directory = root_dir.join("keys");
+        let name = self.key_name.clone();
+        tokio::task::spawn_blocking(move || ios::ensure_keypair(&directory, &name))
+            .await
+            .map_err(|error| AppError::Command(format!("SSH key task failed: {error}")))?
+    }
+
     pub async fn load_key_into_agent(&self, key_path: &Path, _passphrase: &str) -> AppResult<()> {
         if !key_path.exists() {
             return Err(AppError::NotFound(format!(
@@ -137,6 +151,8 @@ impl SshKeyService {
             )));
         }
 
+        #[cfg(target_os = "ios")]
+        ios::load_private_key(key_path)?;
         Ok(())
     }
 
@@ -169,6 +185,7 @@ impl SshKeyService {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 async fn derive_public_key(ssh_keygen_bin: &Path, private_key_path: &Path) -> AppResult<String> {
     let ssh_keygen_bin = ssh_keygen_bin.to_path_buf();
     let private_key_path = private_key_path.to_path_buf();
@@ -253,4 +270,90 @@ fn normalize_key(key: &str) -> String {
         .take(2)
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(target_os = "ios")]
+pub(crate) mod ios {
+    use super::*;
+    use crate::utils::atomic_file::write_atomically;
+    use noland_ssh::keys::{decode_secret_key, ssh_key::LineEnding, Algorithm, PrivateKey};
+    use zeroize::Zeroizing;
+
+    const PREFIX: &str = "keychain:noland-ssh:";
+    static KEY_GATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn key_error(error: impl std::fmt::Display) -> AppError {
+        AppError::State(format!("Could not access the protected SSH key: {error}"))
+    }
+
+    fn entry(id: &str) -> AppResult<keyring::Entry> {
+        uuid::Uuid::parse_str(id).map_err(key_error)?;
+        keyring::Entry::new("noland-connect.ssh", id).map_err(key_error)
+    }
+
+    pub fn load_private_key(path: &Path) -> AppResult<PrivateKey> {
+        let content = Zeroizing::new(std::fs::read_to_string(path)?);
+        let material = if let Some(id) = content.trim().strip_prefix(PREFIX) {
+            Zeroizing::new(entry(id)?.get_password().map_err(key_error)?)
+        } else {
+            content
+        };
+        decode_secret_key(&material, None).map_err(key_error)
+    }
+
+    pub fn ensure_keypair(directory: &Path, name: &str) -> AppResult<SshKeyPaths> {
+        let _guard = KEY_GATE
+            .lock()
+            .map_err(|_| AppError::State("SSH key lock was poisoned".into()))?;
+        let mut components = Path::new(name).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(_)))
+            || components.next().is_some()
+        {
+            return Err(AppError::InvalidInput(
+                "SSH key name must be a filename".into(),
+            ));
+        }
+        std::fs::create_dir_all(directory)?;
+        let private_key_path = directory.join(name);
+        let public_key_path = directory.join(format!("{name}.pub"));
+        let existing = if private_key_path.exists() {
+            Some(Zeroizing::new(std::fs::read_to_string(&private_key_path)?))
+        } else {
+            None
+        };
+        let key = match &existing {
+            Some(_) => load_private_key(&private_key_path)?,
+            None => {
+                PrivateKey::random(&mut rand_ssh::rng(), Algorithm::Ed25519).map_err(key_error)?
+            }
+        };
+        if !existing
+            .as_ref()
+            .is_some_and(|value| value.trim().starts_with(PREFIX))
+        {
+            let id = uuid::Uuid::new_v4().to_string();
+            let stored = entry(&id)?;
+            let material = key.to_openssh(LineEnding::LF).map_err(key_error)?;
+            stored.set_password(&material).map_err(key_error)?;
+            // Verify persistence before replacing a legacy private-key file.
+            // On failure the original remains intact for retry/recovery.
+            let readback = Zeroizing::new(stored.get_password().map_err(key_error)?);
+            let decoded = decode_secret_key(&readback, None).map_err(key_error)?;
+            if decoded.public_key() != key.public_key() {
+                return Err(AppError::State("SSH Keychain verification failed".into()));
+            }
+            write_atomically(&private_key_path, format!("{PREFIX}{id}\n").as_bytes())?;
+        }
+        // Keep the existing path-based state contract; this file contains only
+        // an opaque Keychain reference, never the private key on iOS.
+        let public = key.public_key().to_openssh().map_err(key_error)?;
+        write_atomically(
+            &public_key_path,
+            format!("{} noland-connect\n", normalize_key(&public)).as_bytes(),
+        )?;
+        Ok(SshKeyPaths {
+            private_key_path,
+            public_key_path,
+        })
+    }
 }

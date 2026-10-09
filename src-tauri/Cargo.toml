@@ -1,6 +1,9 @@
 [workspace]
-members = [".", "crates/noland-net-helper"]
+members = [".", "crates/noland-net-helper", "crates/noland-ssh"]
 resolver = "2"
+
+[patch.crates-io]
+swift-rs = { path = "native/third_party/swift-rs" }
 
 [profile.release]
 strip = "symbols"
@@ -13,6 +16,9 @@ authors = ["No Land - Felipe Barros Moura <FelipeBarrosCode@users.noreply.github
 edition = "2021"
 default-run = "noland-connect"
 
+[lib]
+name = "noland_connect"
+crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 bindgen = "0.70.1"
@@ -24,7 +30,6 @@ tauri-build = { version = "2.0.0", features = [] }
 [dependencies]
 noland-network-contracts = { path = "../network-contracts" }
 noland-rclone-adapter = { path = "../state-agent/crates/noland-rclone-adapter" }
-arboard = { version = "3.4", default-features = false }
 async-trait = "0.1.83"
 aes = "0.8.4"
 base64 = "0.22.1"
@@ -41,7 +46,6 @@ keyring = {
     ],
 }
 parking_lot = "0.12.3"
-portable-pty = "0.9.0"
 rand_core = "0.6.4"
 raw-window-handle = "0.6.2"
 rcgen = { version = "0.13.1", features = ["pem", "x509-parser", "ring"] }
@@ -65,8 +69,6 @@ tauri = { version = "2.0.0", features = ["unstable"] }
 tauri-plugin-dialog = "2.0.0"
 tauri-plugin-notification = "2.0.0"
 tauri-plugin-opener = "2.0.0"
-tauri-plugin-process = "2.0.0"
-tauri-plugin-updater = "2.0.0"
 thiserror = "2.0.3"
 time = { version = "0.3.36", features = ["std"] }
 tokio = { version = "1.41.1", features = ["macros", "rt-multi-thread", "time", "process", "fs", "sync", "net"] }
@@ -79,6 +81,17 @@ x509-parser = "0.16.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+arboard = { version = "3.4", default-features = false }
+portable-pty = "0.9.0"
+tauri-plugin-process = "2.0.0"
+tauri-plugin-updater = "2.0.0"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+noland-ssh = { path = "crates/noland-ssh" }
+rand-ssh = { package = "rand", version = "0.10" }
+zeroize = "1"
 
 [features]
 default = ["custom-protocol"]

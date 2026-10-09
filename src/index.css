@@ -2,6 +2,10 @@
 @config "../tailwind.config.ts";
 
 :root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
   --bg: #05050c;
   --panel: #10122a;
   --panel-strong: #16193a;
@@ -53,6 +57,40 @@ body {
 #root {
   width: 100%;
   min-height: 100dvh;
+}
+
+html[data-platform="ios"] {
+  scrollbar-gutter: auto;
+  -webkit-text-size-adjust: 100%;
+}
+
+html[data-platform="ios"] body:not(.stream-window) #root {
+  padding: var(--safe-top) var(--safe-right) var(--safe-bottom) var(--safe-left);
+}
+
+html[data-platform="ios"] .modal-overlay {
+  padding: max(0.75rem, var(--safe-top)) max(0.75rem, var(--safe-right))
+    max(0.75rem, var(--safe-bottom)) max(0.75rem, var(--safe-left));
+}
+
+html[data-platform="ios"] .modal-panel {
+  max-height: calc(100dvh - max(0.75rem, var(--safe-top)) - max(0.75rem, var(--safe-bottom)));
+}
+
+@media (pointer: coarse) {
+  button, input:not([type="checkbox"]):not([type="radio"]), select {
+    min-height: 44px;
+  }
+
+  input, select, textarea {
+    font-size: max(16px, 1rem);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .glitch-title, .crt-surface::after {
+    animation: none !important;
+  }
 }
 
 body::before {

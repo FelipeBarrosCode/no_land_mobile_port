@@ -9,3 +9,5 @@
 *.rs text eol=lf
 *.toml text eol=lf
 *.txt text eol=lf
+
+src-tauri/native/third_party/** whitespace=-trailing-space,-space-before-tab

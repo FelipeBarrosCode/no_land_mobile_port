@@ -7,6 +7,7 @@ pub use desktop_input::{
     set_native_stream_input_debug_overlay_enabled,
 };
 pub use window::{
-    close_stream_window, create_or_reuse_stream_window, stream_window_surface_descriptor,
-    NativeSurfaceDescriptor, StreamWindowCloseState, STREAM_WINDOW_LABEL,
+    close_stream_window, create_or_reuse_stream_window, present_stream_window,
+    stream_window_surface_descriptor, NativeSurfaceDescriptor, StreamWindowCloseState,
+    STREAM_WINDOW_LABEL,
 };

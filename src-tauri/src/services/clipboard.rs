@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+#[cfg(not(target_os = "ios"))]
 use arboard::Clipboard;
 
 use crate::errors::{AppError, AppResult};
@@ -53,6 +54,7 @@ enum RemotePlatform {
     Windows,
 }
 
+#[cfg(not(target_os = "ios"))]
 pub fn read_local_text() -> AppResult<String> {
     let mut clipboard = Clipboard::new()
         .map_err(|error| AppError::Command(format!("Could not open local clipboard: {error}")))?;
@@ -65,6 +67,7 @@ pub fn read_local_text() -> AppResult<String> {
     Ok(content)
 }
 
+#[cfg(not(target_os = "ios"))]
 pub fn write_local_text(content: &str) -> AppResult<()> {
     validate_text(content)?;
     let mut clipboard = Clipboard::new()
@@ -72,6 +75,19 @@ pub fn write_local_text(content: &str) -> AppResult<()> {
     clipboard
         .set_text(content.to_owned())
         .map_err(|error| AppError::Command(format!("Could not write local clipboard: {error}")))
+}
+
+#[cfg(target_os = "ios")]
+pub fn read_local_text() -> AppResult<String> {
+    let content = super::ios_platform::read_clipboard()?;
+    validate_text(&content)?;
+    Ok(content)
+}
+
+#[cfg(target_os = "ios")]
+pub fn write_local_text(content: &str) -> AppResult<()> {
+    validate_text(content)?;
+    super::ios_platform::write_clipboard(content)
 }
 
 pub fn write_remote_text(remote: &RemoteExec, content: String) -> AppResult<()> {

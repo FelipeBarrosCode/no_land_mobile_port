@@ -15,7 +15,17 @@ use crate::moonlight::{
     domain::MoonlightError, native, platform::desktop_input::uninstall_native_stream_input,
 };
 
+#[cfg(not(target_os = "ios"))]
 pub const STREAM_WINDOW_LABEL: &str = "moonlight-stream";
+#[cfg(target_os = "ios")]
+pub const STREAM_WINDOW_LABEL: &str = "main";
+
+#[cfg(target_os = "ios")]
+unsafe extern "C" {
+    fn noland_ios_stream_surface(root: *mut c_void) -> *mut c_void;
+    fn noland_ios_stream_present() -> i32;
+    fn noland_ios_stream_close();
+}
 
 #[derive(Debug, Default)]
 pub struct StreamWindowCloseState {
@@ -69,6 +79,7 @@ impl NativeSurfaceDescriptor {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 pub fn create_or_reuse_stream_window<R: Runtime>(
     app: &AppHandle<R>,
     width: u32,
@@ -104,15 +115,57 @@ pub fn create_or_reuse_stream_window<R: Runtime>(
     Ok(window)
 }
 
+#[cfg(target_os = "ios")]
+pub fn create_or_reuse_stream_window<R: Runtime>(
+    app: &AppHandle<R>,
+    _width: u32,
+    _height: u32,
+    _title: &str,
+) -> Result<Window<R>, MoonlightError> {
+    app.state::<StreamWindowCloseState>().reset();
+    app.get_window(STREAM_WINDOW_LABEL)
+        .ok_or_else(|| MoonlightError::Native("The iOS application window is unavailable".into()))
+}
+
+pub fn present_stream_window<R: Runtime>(window: &Window<R>) -> Result<(), MoonlightError> {
+    #[cfg(not(target_os = "ios"))]
+    {
+        window
+            .show()
+            .map_err(|error| MoonlightError::Native(error.to_string()))?;
+        window
+            .set_fullscreen(true)
+            .map_err(|error| MoonlightError::Native(error.to_string()))?;
+        window
+            .set_focus()
+            .map_err(|error| MoonlightError::Native(error.to_string()))?;
+    }
+    #[cfg(target_os = "ios")]
+    {
+        let _ = window;
+        if unsafe { noland_ios_stream_present() } != 0 {
+            return Err(MoonlightError::Native(
+                "The iOS stream presentation is unavailable".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn close_stream_window<R: Runtime>(app: &AppHandle<R>) -> Result<(), MoonlightError> {
     app.state::<StreamWindowCloseState>().set_allow_close(true);
     app.state::<StreamWindowCloseState>()
         .finish_close_intercept();
     if let Some(window) = app.get_window(STREAM_WINDOW_LABEL) {
         let _ = uninstall_native_stream_input(&window);
+        #[cfg(not(target_os = "ios"))]
         window
             .close()
             .map_err(|error| MoonlightError::Native(error.to_string()))?;
+    }
+    #[cfg(target_os = "ios")]
+    unsafe {
+        noland_ios_stream_close();
     }
     Ok(())
 }
@@ -152,6 +205,23 @@ fn surface_descriptor_from_raw_handles(
     scale_factor: f32,
 ) -> Result<NativeSurfaceDescriptor, MoonlightError> {
     match raw_window {
+        #[cfg(target_os = "ios")]
+        RawWindowHandle::UiKit(handle) => {
+            let surface = unsafe { noland_ios_stream_surface(handle.ui_view.as_ptr()) };
+            if surface.is_null() {
+                return Err(MoonlightError::Native(
+                    "Could not create the iOS stream surface".into(),
+                ));
+            }
+            Ok(NativeSurfaceDescriptor {
+                surface_type: native::nl_surface_type_NL_SURFACE_IOS_UIVIEW,
+                window_handle: surface as usize,
+                display_handle: 0,
+                width,
+                height,
+                scale_factor,
+            })
+        }
         RawWindowHandle::AppKit(handle) => {
             let resolved_view = {
                 #[cfg(all(target_os = "macos", not(test)))]

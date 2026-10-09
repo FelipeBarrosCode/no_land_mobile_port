@@ -64,6 +64,10 @@ import type {
   InstanceConnectionStatusResponse,
 } from "./types";
 
+export async function moonlightPresentStream(): Promise<void> {
+  return invokeSafe<void>("moonlight_present_stream");
+}
+
 export async function getAppState(): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("get_app_state");
 }

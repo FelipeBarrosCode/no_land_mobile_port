@@ -167,7 +167,51 @@ const GOTATUN_STOP_REQUEST_FILE_NAME: &str = "stop.request";
 const GOTATUN_LIFECYCLE_LOCK_FILE_NAME: &str = "lifecycle.lock";
 const GOTATUN_HELPER_READY_TIMEOUT_SECS: u64 = 30;
 const GOTATUN_HELPER_STOP_TIMEOUT_SECS: u64 = 15;
+#[cfg(target_os = "ios")]
+const IOS_WIREGUARD_REFERENCE_PREFIX: &str = "keychain:wireguard:";
 static ACTIVE_GOTATUN_STATUS_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+#[cfg(target_os = "ios")]
+static ACTIVE_IOS_CONFIG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+fn read_local_wireguard_configuration(config_path: &Path) -> AppResult<String> {
+    let stored = std::fs::read_to_string(config_path).map_err(|error| {
+        AppError::Command(format!(
+            "Failed reading WireGuard client config {}: {error}",
+            config_path.display()
+        ))
+    })?;
+    #[cfg(target_os = "ios")]
+    if let Some(reference) = stored.trim().strip_prefix(IOS_WIREGUARD_REFERENCE_PREFIX) {
+        let expected = super::ios_vpn::reference(config_path)?;
+        if reference != expected {
+            return Err(AppError::State(format!(
+                "Protected WireGuard reference mismatch: expected {expected}, found {reference}"
+            )));
+        }
+        return super::ios_vpn::configuration(config_path);
+    }
+    Ok(stored)
+}
+
+#[cfg(target_os = "ios")]
+fn local_wireguard_is_protected(config_path: &Path) -> AppResult<bool> {
+    Ok(std::fs::read_to_string(config_path)?
+        .trim()
+        .starts_with(IOS_WIREGUARD_REFERENCE_PREFIX))
+}
+
+#[cfg(target_os = "ios")]
+fn protect_local_wireguard_configuration(config_path: &Path) -> AppResult<()> {
+    let marker = format!(
+        "{IOS_WIREGUARD_REFERENCE_PREFIX}{}\n",
+        super::ios_vpn::reference(config_path)?
+    );
+    write_atomically(config_path, marker.as_bytes()).map_err(|error| {
+        AppError::State(format!(
+            "The tunnel is active, but its local protected reference could not be committed: {error}"
+        ))
+    })
+}
 
 fn legacy_local_config_path(app_data_dir: &Path) -> PathBuf {
     wireguard_local_root_dir(app_data_dir).join(LEGACY_LOCAL_CONFIG_NAME)
@@ -376,6 +420,13 @@ fn remember_active_gotatun_config(config_path: &Path) {
     if let Ok(mut path) = active_gotatun_status_path().lock() {
         *path = Some(gotatun_status_path(config_path));
     }
+    #[cfg(target_os = "ios")]
+    if let Ok(mut path) = ACTIVE_IOS_CONFIG_PATH
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+    {
+        *path = Some(config_path.to_path_buf());
+    }
 }
 
 fn load_gotatun_runtime_status(path: &Path) -> Option<GotatunRuntimeStatus> {
@@ -397,6 +448,7 @@ fn load_active_gotatun_runtime_status() -> Option<GotatunRuntimeStatus> {
     load_gotatun_runtime_status(&path)
 }
 
+#[cfg(not(target_os = "ios"))]
 pub fn set_managed_gotatun_peer_endpoint(
     config_path: &Path,
     endpoint: NetworkEndpoint,
@@ -430,6 +482,83 @@ pub fn set_managed_gotatun_peer_endpoint(
     Ok(update)
 }
 
+#[cfg(target_os = "ios")]
+pub fn set_managed_gotatun_peer_endpoint(
+    config_path: &Path,
+    endpoint: NetworkEndpoint,
+    transition_id: uuid::Uuid,
+) -> AppResult<ManagedEndpointUpdate> {
+    endpoint
+        .validate()
+        .map_err(|error| AppError::InvalidInput(error.to_string()))?;
+    remember_active_gotatun_config(config_path);
+    let protected = local_wireguard_is_protected(config_path)?;
+    let current = read_local_wireguard_configuration(config_path)?;
+    let previous = parse_wireguard_config_value(&current, "Peer", "Endpoint").ok_or_else(|| {
+        AppError::State("Managed WireGuard configuration has no Peer Endpoint field".into())
+    })?;
+    let expected_fingerprint = format!("{:x}", Sha256::digest(current.as_bytes()));
+    let rendered = format_endpoint(&endpoint);
+    let next = replace_client_config_value(&current, "Peer", "Endpoint", &rendered)?;
+    let next_fingerprint = format!("{:x}", Sha256::digest(next.as_bytes()));
+    // Commit the recoverable local journal first. If the app is killed after
+    // this point, foreground reconciliation installs this exact configuration.
+    if !protected {
+        write_atomically(config_path, next.as_bytes()).map_err(|error| {
+            AppError::Command(format!(
+                "Could not journal the iOS WireGuard endpoint configuration: {error}"
+            ))
+        })?;
+    }
+    let runtime = match super::ios_vpn::update(
+        config_path,
+        &next,
+        &expected_fingerprint,
+        &next_fingerprint,
+        transition_id,
+    ) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            if !protected {
+                write_atomically(config_path, current.as_bytes()).map_err(|restore_error| {
+                AppError::State(format!(
+                    "iOS endpoint update failed ({error}); local journal rollback failed ({restore_error})"
+                ))
+            })?;
+            }
+            return Err(error);
+        }
+    };
+    if runtime.endpoint != rendered || runtime.config_fingerprint != next_fingerprint {
+        let rollback = super::ios_vpn::update(
+            config_path,
+            &current,
+            &next_fingerprint,
+            &expected_fingerprint,
+            transition_id,
+        );
+        if !protected {
+            write_atomically(config_path, current.as_bytes()).map_err(|error| {
+                AppError::State(format!(
+                    "iOS endpoint read-back failed and local rollback failed: {error}"
+                ))
+            })?;
+        }
+        return Err(AppError::State(format!(
+            "iOS tunnel endpoint read-back mismatch: requested {rendered}, observed {}; runtime rollback: {}",
+            runtime.endpoint,
+            rollback.map(|_| "ok".to_string()).unwrap_or_else(|error| error.to_string())
+        )));
+    }
+    Ok(ManagedEndpointUpdate {
+        previous_endpoint: previous,
+        active_endpoint: runtime.endpoint,
+        transition_id,
+        applied_at_unix: gotatun_runtime_unix_timestamp(),
+    })
+}
+
+#[cfg(not(target_os = "ios"))]
 pub fn set_managed_gotatun_mtu(
     config_path: &Path,
     mtu: u16,
@@ -460,6 +589,75 @@ pub fn set_managed_gotatun_mtu(
     Ok(())
 }
 
+#[cfg(target_os = "ios")]
+pub fn set_managed_gotatun_mtu(
+    config_path: &Path,
+    mtu: u16,
+    transition_id: uuid::Uuid,
+) -> AppResult<()> {
+    if !(576..=9000).contains(&mtu) {
+        return Err(AppError::InvalidInput(
+            "Managed tunnel MTU must be between 576 and 9000".into(),
+        ));
+    }
+    remember_active_gotatun_config(config_path);
+    let protected = local_wireguard_is_protected(config_path)?;
+    let current = read_local_wireguard_configuration(config_path)?;
+    let expected_fingerprint = format!("{:x}", Sha256::digest(current.as_bytes()));
+    let next = replace_client_config_value(&current, "Interface", "MTU", &mtu.to_string())?;
+    let next_fingerprint = format!("{:x}", Sha256::digest(next.as_bytes()));
+    if !protected {
+        write_atomically(config_path, next.as_bytes()).map_err(|error| {
+            AppError::Command(format!(
+                "Could not journal the iOS WireGuard MTU configuration: {error}"
+            ))
+        })?;
+    }
+    let runtime = match super::ios_vpn::update(
+        config_path,
+        &next,
+        &expected_fingerprint,
+        &next_fingerprint,
+        transition_id,
+    ) {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            if !protected {
+                write_atomically(config_path, current.as_bytes()).map_err(|restore_error| {
+                AppError::State(format!(
+                    "iOS MTU update failed ({error}); local journal rollback failed ({restore_error})"
+                ))
+            })?;
+            }
+            return Err(error);
+        }
+    };
+    if runtime.mtu != mtu || runtime.config_fingerprint != next_fingerprint {
+        let rollback = super::ios_vpn::update(
+            config_path,
+            &current,
+            &next_fingerprint,
+            &expected_fingerprint,
+            transition_id,
+        );
+        if !protected {
+            write_atomically(config_path, current.as_bytes()).map_err(|error| {
+                AppError::State(format!(
+                    "iOS MTU read-back failed and local rollback failed: {error}"
+                ))
+            })?;
+        }
+        return Err(AppError::State(format!(
+            "iOS tunnel MTU read-back mismatch: requested {mtu}, observed {}; runtime rollback: {}",
+            runtime.mtu,
+            rollback
+                .map(|_| "ok".to_string())
+                .unwrap_or_else(|error| error.to_string())
+        )));
+    }
+    Ok(())
+}
+
 fn format_endpoint(endpoint: &NetworkEndpoint) -> String {
     if endpoint.host.parse::<IpAddr>().is_ok_and(|ip| ip.is_ipv6()) {
         format!("[{}]:{}", endpoint.host, endpoint.port)
@@ -468,6 +666,7 @@ fn format_endpoint(endpoint: &NetworkEndpoint) -> String {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 fn persist_client_config_value(
     config_path: &Path,
     section: &str,
@@ -475,6 +674,21 @@ fn persist_client_config_value(
     value: &str,
 ) -> AppResult<()> {
     let config = std::fs::read_to_string(config_path)?;
+    let output = replace_client_config_value(&config, section, key, value)?;
+    write_atomically(config_path, output.as_bytes()).map_err(|error| {
+        AppError::Command(format!(
+            "Could not persist managed WireGuard {key} in {}: {error}",
+            config_path.display()
+        ))
+    })
+}
+
+fn replace_client_config_value(
+    config: &str,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> AppResult<String> {
     let mut current_section = None::<String>;
     let mut replaced = false;
     let mut output = String::with_capacity(config.len() + value.len());
@@ -500,14 +714,10 @@ fn persist_client_config_value(
             "Managed WireGuard configuration has no {section} {key} field"
         )));
     }
-    write_atomically(config_path, output.as_bytes()).map_err(|error| {
-        AppError::Command(format!(
-            "Could not persist managed WireGuard {key} in {}: {error}",
-            config_path.display()
-        ))
-    })
+    Ok(output)
 }
 
+#[cfg(not(target_os = "ios"))]
 pub fn get_managed_gotatun_runtime(config_path: &Path) -> AppResult<ManagedTunnelRuntime> {
     let status = require_active_gotatun_control(config_path)?;
     let launch_id = status.launch_id.parse::<uuid::Uuid>().map_err(|error| {
@@ -524,6 +734,23 @@ pub fn get_managed_gotatun_runtime(config_path: &Path) -> AppResult<ManagedTunne
         params: serde_json::json!({}),
     };
     decode_helper_result(call_gotatun_control(&status.control_endpoint, &request)?)
+}
+
+#[cfg(target_os = "ios")]
+pub fn get_managed_gotatun_runtime(config_path: &Path) -> AppResult<ManagedTunnelRuntime> {
+    remember_active_gotatun_config(config_path);
+    let runtime = super::ios_vpn::runtime(config_path)?;
+    Ok(ManagedTunnelRuntime {
+        active: runtime.active,
+        launch_id: runtime.launch_id,
+        config_fingerprint: runtime.config_fingerprint,
+        peer_public_key: runtime.peer_public_key,
+        endpoint: runtime.endpoint,
+        mtu: runtime.mtu,
+        latest_handshake_age_secs: runtime.latest_handshake_age_secs,
+        rx_bytes: runtime.rx_bytes,
+        tx_bytes: runtime.tx_bytes,
+    })
 }
 
 fn require_active_gotatun_control(config_path: &Path) -> AppResult<GotatunRuntimeStatus> {
@@ -756,12 +983,7 @@ fn process_matches_gotatun_status(status: &GotatunRuntimeStatus) -> bool {
 }
 
 fn config_fingerprint(config_path: &Path) -> AppResult<String> {
-    let content = std::fs::read(config_path).map_err(|error| {
-        AppError::Command(format!(
-            "Failed reading managed tunnel config {} for fingerprinting: {error}",
-            config_path.display()
-        ))
-    })?;
+    let content = read_local_wireguard_configuration(config_path)?.into_bytes();
     Ok(format!("{:x}", Sha256::digest(content)))
 }
 
@@ -957,6 +1179,15 @@ fn launch_managed_gotatun_helper(config_path: &Path, launch_id: &str) -> AppResu
                 ))
             })?;
         return Ok(());
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        let _ = (helper, runtime_dir, launch_id);
+        Err(AppError::State(
+            "The desktop tunnel helper cannot run on iOS; the Network Extension adapter must be used"
+                .into(),
+        ))
     }
 }
 
@@ -1241,6 +1472,7 @@ fn teardown_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
     Ok("Embedded GotaTun tunnel stopped by Noland".to_string())
 }
 
+#[cfg(not(target_os = "ios"))]
 pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
     remember_active_gotatun_config(config_path);
     let expected = load_expected_local_tunnel(config_path)?;
@@ -1304,6 +1536,47 @@ pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
             .latest_handshake_age_secs
             .map(|age| format!("{age}s"))
             .unwrap_or_else(|| "pending".to_string())
+    ))
+}
+
+#[cfg(target_os = "ios")]
+pub fn verify_managed_gotatun_tunnel(config_path: &Path) -> AppResult<String> {
+    remember_active_gotatun_config(config_path);
+    let expected = load_expected_local_tunnel(config_path)?;
+    let expected_fingerprint = config_fingerprint(config_path)?;
+    let status = super::ios_vpn::status(config_path)?;
+    if !status.ok || status.status != "connected" {
+        return Err(AppError::State(status.error.unwrap_or_else(|| {
+            format!("The iOS packet tunnel is {}", status.status)
+        })));
+    }
+    let runtime = get_managed_gotatun_runtime(config_path)?;
+    let endpoint = format_endpoint(&NetworkEndpoint {
+        host: expected.endpoint_host.clone(),
+        port: expected.endpoint_port,
+    });
+    if !runtime.active
+        || runtime.config_fingerprint != expected_fingerprint
+        || runtime.peer_public_key != expected.peer_public_key
+        || runtime.endpoint != endpoint
+    {
+        return Err(AppError::State(format!(
+            "iOS packet tunnel read-back mismatch (active={}, endpoint={}, expected_endpoint={endpoint})",
+            runtime.active, runtime.endpoint
+        )));
+    }
+    if !runtime
+        .latest_handshake_age_secs
+        .is_some_and(|age| age <= 180)
+    {
+        return Err(AppError::State(
+            "The iOS packet tunnel has not completed a recent WireGuard handshake".into(),
+        ));
+    }
+    Ok(format!(
+        "iOS Network Extension is active with the exact current config (endpoint={}, handshake_age={}s)",
+        runtime.endpoint,
+        runtime.latest_handshake_age_secs.unwrap_or_default()
     ))
 }
 
@@ -2312,6 +2585,7 @@ pub fn setup_local_wireguard_client(config_path: &Path) -> AppResult<String> {
         )));
     }
 
+    #[cfg(not(target_os = "ios"))]
     ensure_local_wireguard_tools()?;
 
     normalize_wireguard_client_allowed_ips(config_path)?;
@@ -2327,6 +2601,7 @@ pub fn reconnect_local_wireguard_client(config_path: &Path) -> AppResult<String>
         )));
     }
 
+    #[cfg(not(target_os = "ios"))]
     ensure_local_wireguard_tools()?;
 
     normalize_wireguard_client_allowed_ips(config_path)?;
@@ -2335,18 +2610,54 @@ pub fn reconnect_local_wireguard_client(config_path: &Path) -> AppResult<String>
 }
 
 pub fn teardown_local_wireguard_client(config_path: &Path) -> AppResult<String> {
-    teardown_managed_gotatun_tunnel(config_path)
+    #[cfg(not(target_os = "ios"))]
+    return teardown_managed_gotatun_tunnel(config_path);
+    #[cfg(target_os = "ios")]
+    {
+        remember_active_gotatun_config(config_path);
+        let status = super::ios_vpn::stop(config_path)?;
+        Ok(format!("iOS managed tunnel stopped ({})", status.status))
+    }
 }
 
 fn setup_local_wireguard_client_inner(config_path: &Path) -> AppResult<String> {
-    setup_managed_gotatun_tunnel(config_path)
+    #[cfg(not(target_os = "ios"))]
+    return setup_managed_gotatun_tunnel(config_path);
+    #[cfg(target_os = "ios")]
+    return install_ios_wireguard_tunnel(config_path, "installed and activated");
 }
 
 fn reconnect_local_wireguard_client_inner(config_path: &Path) -> AppResult<String> {
-    reconnect_managed_gotatun_tunnel(config_path)
+    #[cfg(not(target_os = "ios"))]
+    return reconnect_managed_gotatun_tunnel(config_path);
+    #[cfg(target_os = "ios")]
+    return install_ios_wireguard_tunnel(config_path, "reconnected");
+}
+
+#[cfg(target_os = "ios")]
+fn install_ios_wireguard_tunnel(config_path: &Path, action: &str) -> AppResult<String> {
+    remember_active_gotatun_config(config_path);
+    let configuration = read_local_wireguard_configuration(config_path)?;
+    let expected = load_expected_local_tunnel(config_path)?;
+    let fingerprint = format!("{:x}", Sha256::digest(configuration.as_bytes()));
+    let launch_id = uuid::Uuid::new_v4().to_string();
+    let status = super::ios_vpn::install(config_path, &configuration, &launch_id, &fingerprint)?;
+    if status.status != "connected" {
+        return Err(AppError::State(format!(
+            "iOS packet tunnel did not connect after installation: {}",
+            status.status
+        )));
+    }
+    protect_local_wireguard_configuration(config_path)?;
+    wait_for_local_tunnel_health(&expected, Duration::from_secs(120), Duration::from_secs(2))?;
+    Ok(format!("iOS Network Extension tunnel {action} by Noland"))
 }
 
 pub fn remove_local_wireguard_config(config_path: &Path) -> AppResult<()> {
+    #[cfg(target_os = "ios")]
+    if config_path.exists() {
+        super::ios_vpn::remove(config_path)?;
+    }
     let Some(parent) = config_path.parent() else {
         return Ok(());
     };
@@ -2391,6 +2702,7 @@ pub fn remove_local_wireguard_config(config_path: &Path) -> AppResult<()> {
     Ok(())
 }
 
+#[cfg(not(target_os = "ios"))]
 pub fn read_local_wireguard_show_output() -> AppResult<String> {
     let Some(status) = load_active_gotatun_runtime_status() else {
         return Ok(String::new());
@@ -2414,6 +2726,37 @@ pub fn read_local_wireguard_show_output() -> AppResult<String> {
         status.rx_bytes,
         status.tx_bytes,
         status.pid,
+    ))
+}
+
+#[cfg(target_os = "ios")]
+pub fn read_local_wireguard_show_output() -> AppResult<String> {
+    let config_path = ACTIVE_IOS_CONFIG_PATH
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .map_err(|_| AppError::State("iOS tunnel path lock was poisoned".into()))?
+        .clone();
+    let Some(config_path) = config_path else {
+        return Ok(String::new());
+    };
+    let runtime = match get_managed_gotatun_runtime(&config_path) {
+        Ok(runtime) if runtime.active => runtime,
+        Ok(_) => return Ok(String::new()),
+        Err(error) => return Err(error),
+    };
+    let expected = load_expected_local_tunnel(&config_path)?;
+    let handshake = runtime
+        .latest_handshake_age_secs
+        .map(|age| format!("{age} seconds ago"))
+        .unwrap_or_else(|| "never".into());
+    Ok(format!(
+        "interface: noland-ios\n  public key: managed-by-wireguardkit\n  peer: {}\n    endpoint: {}\n    allowed ips: {}\n    latest handshake: {}\n    transfer: {} B received, {} B sent\n",
+        runtime.peer_public_key,
+        runtime.endpoint,
+        expected.allowed_ips,
+        handshake,
+        runtime.rx_bytes,
+        runtime.tx_bytes,
     ))
 }
 
@@ -2589,12 +2932,9 @@ fn ensure_local_wireguard_tools() -> AppResult<()> {
 fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
     const SCOPED_ALLOWED_IPS: &str = "10.77.0.1/32";
 
-    let original = std::fs::read_to_string(config_path).map_err(|error| {
-        AppError::Command(format!(
-            "Failed reading WireGuard client config {}: {error}",
-            config_path.display()
-        ))
-    })?;
+    let original = read_local_wireguard_configuration(config_path)?;
+    #[cfg(target_os = "ios")]
+    let protected = local_wireguard_is_protected(config_path)?;
 
     let mut in_peer_section = false;
     let mut in_interface_section = false;
@@ -2638,6 +2978,13 @@ fn normalize_wireguard_client_allowed_ips(config_path: &Path) -> AppResult<()> {
     }
 
     if normalized != original {
+        #[cfg(target_os = "ios")]
+        if protected {
+            return Err(AppError::State(
+                "The protected tunnel has legacy broad routes. Re-run provisioning to migrate it safely."
+                    .into(),
+            ));
+        }
         std::fs::write(config_path, normalized).map_err(|error| {
             AppError::Command(format!(
                 "Failed writing normalized WireGuard client config {}: {error}",
@@ -2684,16 +3031,10 @@ fn derive_public_key(private_key: &str) -> AppResult<String> {
 async fn load_existing_local_identity(
     config_path: &Path,
 ) -> AppResult<Option<ExistingLocalIdentity>> {
-    let content = match fs::read_to_string(config_path).await {
-        Ok(value) => value,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => {
-            return Err(AppError::Command(format!(
-                "Failed reading local WireGuard config {}: {error}",
-                config_path.display()
-            )))
-        }
-    };
+    if !config_path.exists() {
+        return Ok(None);
+    }
+    let content = read_local_wireguard_configuration(config_path)?;
 
     let client_private_key = match parse_wireguard_config_value(&content, "Interface", "PrivateKey")
     {
@@ -2712,12 +3053,7 @@ async fn load_existing_local_identity(
 }
 
 fn load_expected_local_tunnel(config_path: &Path) -> AppResult<ExpectedLocalTunnel> {
-    let content = std::fs::read_to_string(config_path).map_err(|error| {
-        AppError::Command(format!(
-            "Failed reading WireGuard client config {}: {error}",
-            config_path.display()
-        ))
-    })?;
+    let content = read_local_wireguard_configuration(config_path)?;
 
     let interface_private_key = parse_wireguard_config_value(&content, "Interface", "PrivateKey")
         .ok_or_else(|| {
@@ -3127,9 +3463,24 @@ mod tests {
     use super::GOTATUN_RUNTIME_DIR_NAME;
     use super::{
         build_windows_tunnel_launch_script, gotatun_runtime_dir, has_recent_handshake,
-        linux_process_start_ticks, linux_process_state, validate_firewall_interface,
-        windows_command_line_quote,
+        linux_process_start_ticks, linux_process_state, replace_client_config_value,
+        validate_firewall_interface, windows_command_line_quote,
     };
+
+    #[test]
+    fn replaces_only_the_requested_wireguard_section_value() {
+        let config =
+            "[Interface]\nMTU = 1280\n# MTU = untouched\n\n[Peer]\nEndpoint = old.example:1000\n";
+        let endpoint =
+            replace_client_config_value(config, "Peer", "Endpoint", "[::1]:2000").unwrap();
+        assert!(endpoint.contains("MTU = 1280"));
+        assert!(endpoint.contains("# MTU = untouched"));
+        assert!(endpoint.contains("Endpoint = [::1]:2000"));
+        let mtu = replace_client_config_value(&endpoint, "Interface", "MTU", "1400").unwrap();
+        assert!(mtu.contains("MTU = 1400"));
+        assert!(mtu.contains("Endpoint = [::1]:2000"));
+        assert!(replace_client_config_value(config, "Peer", "MTU", "1400").is_err());
+    }
 
     #[test]
     fn parses_linux_process_state_after_complex_command_name() {

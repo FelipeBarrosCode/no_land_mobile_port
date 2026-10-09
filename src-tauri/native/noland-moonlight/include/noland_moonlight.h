@@ -47,7 +47,8 @@ typedef enum nl_surface_type {
   NL_SURFACE_WINDOWS_HWND = 1,
   NL_SURFACE_MACOS_NSVIEW = 2,
   NL_SURFACE_X11_WINDOW = 3,
-  NL_SURFACE_WAYLAND_SURFACE = 4
+  NL_SURFACE_WAYLAND_SURFACE = 4,
+  NL_SURFACE_IOS_UIVIEW = 5
 } nl_surface_type_t;
 
 typedef enum nl_pacing_mode {

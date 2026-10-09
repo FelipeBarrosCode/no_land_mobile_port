@@ -9,6 +9,10 @@ pub mod display_profile;
 pub mod health_check;
 pub mod instance_lifecycle;
 pub mod instance_manager;
+#[cfg(target_os = "ios")]
+pub mod ios_platform;
+#[cfg(target_os = "ios")]
+pub mod ios_vpn;
 pub mod launch_library;
 pub mod lifecycle_agent;
 pub mod location;
@@ -26,8 +30,10 @@ mod package_manager;
 pub mod post_wireguard_setup;
 pub mod reboot_helper;
 pub mod remote_display;
+#[cfg_attr(target_os = "ios", path = "remote_exec_ios.rs")]
 pub mod remote_exec;
 pub mod shared_storage;
+#[cfg_attr(target_os = "ios", path = "sleep_inhibit_ios.rs")]
 pub mod sleep_inhibit;
 pub mod software_artwork;
 pub mod ssh_keys;

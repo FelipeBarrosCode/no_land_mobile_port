@@ -44,6 +44,16 @@ fn main() {
 
     let target = env::var("TARGET").expect("TARGET is not set");
 
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("ios") {
+        println!("cargo:rerun-if-changed=apple/NolandPlatform.m");
+        cc::Build::new()
+            .file("apple/NolandPlatform.m")
+            .flag("-fobjc-arc")
+            .compile("noland_ios_platform");
+        println!("cargo:rustc-link-lib=framework=UIKit");
+        println!("cargo:rustc-link-lib=framework=Foundation");
+    }
+
     if matches!(env::var("NOLAND_SKIP_NATIVE_BUILD").as_deref(), Ok("1")) {
         if target.ends_with("apple-darwin") {
             cc::Build::new()
@@ -445,6 +455,7 @@ pub const nl_surface_type_NL_SURFACE_WINDOWS_HWND: nl_surface_type_t = 1;
 pub const nl_surface_type_NL_SURFACE_MACOS_NSVIEW: nl_surface_type_t = 2;
 pub const nl_surface_type_NL_SURFACE_X11_WINDOW: nl_surface_type_t = 3;
 pub const nl_surface_type_NL_SURFACE_WAYLAND_SURFACE: nl_surface_type_t = 4;
+pub const nl_surface_type_NL_SURFACE_IOS_UIVIEW: nl_surface_type_t = 5;
 
 pub type nl_pacing_mode_t = ::std::os::raw::c_uint;
 pub const nl_pacing_mode_NL_PACING_MODE_OFF: nl_pacing_mode_t = 0;

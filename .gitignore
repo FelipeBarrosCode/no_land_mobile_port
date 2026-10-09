@@ -8,6 +8,13 @@ src-tauri/gen/
 src-tauri/bundled/
 src-tauri/.native-deps/
 src-tauri/native/build/
+src-tauri/native/third_party/wireguard-apple/build/
+src-tauri/native/third_party/wireguard-apple/.swiftpm/
+# The vendored Swift package uses only these targets: WireGuardKit,
+# WireGuardKitC, and WireGuardKitGo. Exclude the upstream standalone app.
+src-tauri/native/third_party/wireguard-apple/Sources/Shared/
+src-tauri/native/third_party/wireguard-apple/Sources/WireGuardApp/
+src-tauri/native/third_party/wireguard-apple/Sources/WireGuardNetworkExtension/
 
 # Packaging staging area recreated by prepare-mic-sidecar.mjs
 src-tauri/binaries/

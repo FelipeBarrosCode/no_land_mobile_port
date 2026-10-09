@@ -1,0 +1,166 @@
+name: noland-connect
+options:
+  bundleIdPrefix: noland.main
+  deploymentTarget:
+    iOS: 15.0
+fileGroups: [../../src]
+configs:
+  debug: debug
+  release: release
+schemes:
+  NolandPacketTunnelOnly:
+    build:
+      targets:
+        NolandPacketTunnel: all
+settingGroups:
+  app:
+    base:
+      PRODUCT_NAME: NolandConnectMobile
+      PRODUCT_BUNDLE_IDENTIFIER: noland.main.app
+      DEVELOPMENT_TEAM: U66WLT4SP6
+      CODE_SIGN_STYLE: Automatic
+packages:
+  WireGuardKit:
+    path: ../../native/third_party/wireguard-apple
+targetTemplates:
+  app:
+    type: application
+    sources:
+      - path: Sources
+    scheme:
+      environmentVariables:
+        RUST_BACKTRACE: full
+        RUST_LOG: info
+    settings:
+      groups: [app]
+targets:
+  noland-connect_iOS:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources/noland-connect
+      - path: Sources/NolandTunnelShared
+      - path: Assets.xcassets
+      - path: noland-connect_iOS
+      - path: assets
+        buildPhase: resources
+        type: folder
+      - path: LaunchScreen.storyboard
+    info:
+      path: noland-connect_iOS/Info.plist
+      properties:
+        CFBundleDisplayName: Noland Connect Mobile
+        LSRequiresIPhoneOS: true
+        UILaunchStoryboardName: LaunchScreen
+        UIRequiredDeviceCapabilities: [arm64, metal]
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+        CFBundleShortVersionString: 0.1.17
+        CFBundleVersion: "17"
+        CADisableMinimumFrameDuration: true
+        GCSupportedGameControllers:
+          - ProfileName: ExtendedGamepad
+        GCSupportsControllerUserInteraction: true
+        ITSAppUsesNonExemptEncryption: false
+        NSBonjourServices:
+          - _nvstream._tcp
+        NSLocalNetworkUsageDescription: "Noland Connect uses the local network to reach and stream from your remote workstation."
+        NSMicrophoneUsageDescription: "Noland Connect uses the microphone only while microphone forwarding is enabled."
+        NolandKeychainAccessGroup: $(AppIdentifierPrefix)com.noland.connect.mobile.shared
+        UIRequiresFullScreen: true
+    entitlements:
+      path: noland-connect_iOS/noland-connect_iOS.entitlements
+      properties:
+        com.apple.security.application-groups:
+          - group.com.noland.connect.mobile.shared
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.noland.connect.mobile.shared
+    settings:
+      base:
+        ENABLE_BITCODE: false
+        ARCHS: [arm64]
+        CODE_SIGN_ALLOW_ENTITLEMENTS_MODIFICATION: YES
+        ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES: true
+        EXCLUDED_ARCHS[sdk=iphoneos*]: x86_64
+      groups: [app]
+    dependencies:
+      - target: NolandPacketTunnel
+        embed: true
+      - package: WireGuardKit
+      - framework: libapp.a
+        embed: false
+      - sdk: CoreGraphics.framework
+      - sdk: Metal.framework
+      - sdk: MetalKit.framework
+      - sdk: QuartzCore.framework
+      - sdk: Security.framework
+      - sdk: UIKit.framework
+      - sdk: WebKit.framework
+      - sdk: AVFoundation.framework
+      - sdk: AudioToolbox.framework
+      - sdk: GameController.framework
+      - sdk: NetworkExtension.framework
+    preBuildScripts:
+      - script: npm run -- tauri ios xcode-script -v --platform ${PLATFORM_DISPLAY_NAME:?} --sdk-root ${SDKROOT:?} --framework-search-paths "${FRAMEWORK_SEARCH_PATHS:?}" --header-search-paths "${HEADER_SEARCH_PATHS:?}" --gcc-preprocessor-definitions "${GCC_PREPROCESSOR_DEFINITIONS:-}" --configuration ${CONFIGURATION:?} ${FORCE_COLOR} ${ARCHS:?}
+        name: Build Rust Code
+        basedOnDependencyAnalysis: false
+        outputFiles:
+          - $(SRCROOT)/Externals/x86_64/${CONFIGURATION}/libapp.a
+          - $(SRCROOT)/Externals/arm64/${CONFIGURATION}/libapp.a
+  NolandPacketTunnel:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "15.0"
+    sources:
+      - path: Sources/NolandTunnelShared
+      - path: Sources/NolandPacketTunnel
+    info:
+      path: NolandPacketTunnel/Info.plist
+      properties:
+        CFBundleDisplayName: Noland Tunnel
+        CFBundleShortVersionString: 0.1.17
+        CFBundleVersion: "17"
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
+        NolandKeychainAccessGroup: $(AppIdentifierPrefix)com.noland.connect.mobile.shared
+    entitlements:
+      path: NolandPacketTunnel/NolandPacketTunnel.entitlements
+      properties:
+        com.apple.developer.networking.networkextension:
+          - packet-tunnel-provider
+        com.apple.security.application-groups:
+          - group.com.noland.connect.mobile.shared
+        keychain-access-groups:
+          - $(AppIdentifierPrefix)com.noland.connect.mobile.shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: noland.main.app.PacketTunnel
+        PRODUCT_NAME: NolandPacketTunnel
+        DEVELOPMENT_TEAM: U66WLT4SP6
+        CODE_SIGN_STYLE: Automatic
+        SKIP_INSTALL: YES
+        APPLICATION_EXTENSION_API_ONLY: YES
+    dependencies:
+      - package: WireGuardKit
+      - sdk: NetworkExtension.framework
+    preBuildScripts:
+      - name: Build pinned WireGuard Go bridge
+        basedOnDependencyAnalysis: false
+        script: |
+          set -euo pipefail
+          WG_GO_DIR="${PROJECT_DIR}/../../native/third_party/wireguard-apple/Sources/WireGuardKitGo"
+          test -f "$WG_GO_DIR/Makefile"
+          /usr/bin/make -C "$WG_GO_DIR" build \
+            ARCHS="${ARCHS}" \
+            PLATFORM_NAME="${PLATFORM_NAME}" \
+            SDKROOT="${SDKROOT}" \
+            CONFIGURATION_BUILD_DIR="${CONFIGURATION_BUILD_DIR}" \
+            CONFIGURATION_TEMP_DIR="${CONFIGURATION_TEMP_DIR}"

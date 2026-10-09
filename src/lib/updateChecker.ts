@@ -1,6 +1,7 @@
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check, type DownloadEvent, type Update } from "@tauri-apps/plugin-updater";
 import { translate } from "./i18n";
+import { isIOS } from "./platform";
 
 export interface AppUpdateInfo {
   currentVersion: string;
@@ -20,7 +21,9 @@ export interface AppUpdateProgress {
 let pendingUpdate: Update | null = null;
 
 export async function checkForAppUpdate(): Promise<AppUpdateInfo | null> {
-  if (!("__TAURI_INTERNALS__" in window)) return null;
+  // iOS updates are delivered through App Store/TestFlight, not the desktop
+  // executable replacement protocol.
+  if (isIOS || !("__TAURI_INTERNALS__" in window)) return null;
 
   if (!pendingUpdate) pendingUpdate = await check({ timeout: 30_000 });
   if (!pendingUpdate) return null;

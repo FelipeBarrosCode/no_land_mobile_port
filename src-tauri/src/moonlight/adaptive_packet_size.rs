@@ -1320,6 +1320,29 @@ fn interface_mtu(_interface: &str) -> Option<u32> {
     None
 }
 
+#[cfg(target_os = "ios")]
+fn interface_mtu(name: &str) -> Option<u32> {
+    // Darwin exposes link MTU through getifaddrs; no sandboxed ifconfig process.
+    let mut interfaces: *mut libc::ifaddrs = std::ptr::null_mut();
+    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 { return None; }
+    let mut current = interfaces;
+    let mut mtu = None;
+    while !current.is_null() {
+        let entry = unsafe { &*current };
+        if !entry.ifa_name.is_null() && !entry.ifa_addr.is_null() && !entry.ifa_data.is_null()
+            && unsafe { (*entry.ifa_addr).sa_family as i32 } == libc::AF_LINK
+            && unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) }.to_bytes() == name.as_bytes()
+        {
+            let data = unsafe { &*(entry.ifa_data as *const libc::if_data) };
+            mtu = (data.ifi_mtu > 0).then_some(data.ifi_mtu);
+            break;
+        }
+        current = entry.ifa_next;
+    }
+    unsafe { libc::freeifaddrs(interfaces); }
+    mtu
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
