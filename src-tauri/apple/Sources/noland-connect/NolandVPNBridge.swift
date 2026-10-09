@@ -111,13 +111,24 @@ private final class NolandVPNController {
 
     private func waitForConnection(_ manager: NETunnelProviderManager) throws {
         let deadline = Date().addingTimeInterval(vpnTimeout)
+        let initialStatusGraceDeadline = Date().addingTimeInterval(5)
+        var observedConnectionAttempt = false
         while Date() < deadline {
             switch manager.connection.status {
             case .connected: return
+            case .connecting, .reasserting, .disconnecting:
+                observedConnectionAttempt = true
             case .invalid, .disconnected:
-                throw NSError(domain: "NolandVPN", code: 4, userInfo: [NSLocalizedDescriptionKey: "The packet tunnel stopped before becoming connected."])
-            default: Thread.sleep(forTimeInterval: 0.1)
+                // startVPNTunnel() returns before NEVPNConnection publishes its
+                // first asynchronous status update. Do not roll back a valid
+                // profile merely because this object still reports the stale
+                // pre-start disconnected state for a few milliseconds.
+                if observedConnectionAttempt || Date() >= initialStatusGraceDeadline {
+                    throw NSError(domain: "NolandVPN", code: 4, userInfo: [NSLocalizedDescriptionKey: "The packet tunnel stopped before becoming connected."])
+                }
+            @unknown default: break
             }
+            Thread.sleep(forTimeInterval: 0.1)
         }
         throw NSError(domain: "NolandVPN", code: 5, userInfo: [NSLocalizedDescriptionKey: "The packet tunnel did not connect before the deadline."])
     }
