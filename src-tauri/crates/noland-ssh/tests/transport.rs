@@ -9,9 +9,11 @@ use russh::{
 use russh_sftp::protocol::{Attrs, FileAttributes, Handle, OpenFlags, Status, StatusCode, Version};
 use std::{
     collections::HashMap,
+    path::Path,
     sync::{Arc, Mutex},
     time::Duration,
 };
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 #[derive(Default)]
 struct Observed {
@@ -27,6 +29,7 @@ struct Handler {
     observed: Arc<Mutex<Observed>>,
     channels: HashMap<ChannelId, Channel<Msg>>,
     command: Vec<u8>,
+    allow_sftp: bool,
 }
 
 impl server::Handler for Handler {
@@ -56,11 +59,25 @@ impl server::Handler for Handler {
         command: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
-        // Handler callbacks consume exec data; only SFTP needs the channel reader.
-        self.channels.remove(&id);
         self.observed.lock().unwrap().exec_count += 1;
         self.command = command.to_vec();
         session.channel_success(id)?;
+        if command.starts_with(b"scp -t") {
+            let channel = self.channels.remove(&id).unwrap();
+            let observed = self.observed.clone();
+            tokio::spawn(async move {
+                receive_scp(
+                    channel.into_stream(),
+                    Path::new("/fallback-target"),
+                    observed,
+                )
+                .await;
+            });
+        } else {
+            // Handler callbacks consume ordinary exec data; subsystem protocols
+            // need the channel reader and remove it themselves.
+            self.channels.remove(&id);
+        }
         Ok(())
     }
     async fn data(
@@ -69,6 +86,9 @@ impl server::Handler for Handler {
         data: &[u8],
         session: &mut Session,
     ) -> Result<(), Self::Error> {
+        if self.command.starts_with(b"scp -t") {
+            return Ok(());
+        }
         session.data(id, data.to_vec())?;
         Ok(())
     }
@@ -130,6 +150,10 @@ impl server::Handler for Handler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         assert_eq!(name, "sftp");
+        if !self.allow_sftp {
+            session.channel_failure(id)?;
+            return Ok(());
+        }
         session.channel_success(id)?;
         let channel = self.channels.remove(&id).unwrap();
         let observed = self.observed.clone();
@@ -217,6 +241,17 @@ async fn fixture() -> (
     tempfile::TempDir,
     tokio::task::JoinHandle<()>,
 ) {
+    fixture_with_sftp(true).await
+}
+
+async fn fixture_with_sftp(
+    allow_sftp: bool,
+) -> (
+    Connection,
+    Arc<Mutex<Observed>>,
+    tempfile::TempDir,
+    tokio::task::JoinHandle<()>,
+) {
     let root = tempfile::tempdir().unwrap();
     let private_key = Arc::new(PrivateKey::random(&mut rand::rng(), Algorithm::Ed25519).unwrap());
     let expected_key = private_key.public_key().clone();
@@ -237,6 +272,7 @@ async fn fixture() -> (
                 observed: server_observed.clone(),
                 channels: HashMap::new(),
                 command: Vec::new(),
+                allow_sftp,
             };
             let config = config.clone();
             tokio::spawn(async move {
@@ -258,6 +294,66 @@ async fn fixture() -> (
         root,
         task,
     )
+}
+
+async fn receive_scp<S>(mut stream: S, target: &Path, observed: Arc<Mutex<Observed>>)
+where
+    S: AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    stream.write_all(&[0]).await.unwrap();
+    let mut directories = Vec::<String>::new();
+    let mut first_entry = true;
+    loop {
+        let Some(line) = read_protocol_line(&mut stream).await else {
+            break;
+        };
+        if line == "E" {
+            directories.pop();
+            stream.write_all(&[0]).await.unwrap();
+            continue;
+        }
+        let kind = line.as_bytes()[0];
+        let mut fields = line[1..].splitn(3, ' ');
+        let _mode = fields.next().unwrap();
+        let size = fields.next().unwrap().parse::<usize>().unwrap();
+        let name = fields.next().unwrap();
+        let path = if first_entry {
+            first_entry = false;
+            target.to_string_lossy().into_owned()
+        } else {
+            format!("{}/{}", directories.last().unwrap(), name)
+        };
+        match kind {
+            b'D' => {
+                observed.lock().unwrap().directories.push(path.clone());
+                directories.push(path);
+                stream.write_all(&[0]).await.unwrap();
+            }
+            b'C' => {
+                stream.write_all(&[0]).await.unwrap();
+                let mut contents = vec![0; size];
+                stream.read_exact(&mut contents).await.unwrap();
+                let mut terminator = [0];
+                stream.read_exact(&mut terminator).await.unwrap();
+                assert_eq!(terminator, [0]);
+                observed.lock().unwrap().files.insert(path, contents);
+                stream.write_all(&[0]).await.unwrap();
+            }
+            _ => panic!("unexpected SCP command: {line}"),
+        }
+    }
+}
+
+async fn read_protocol_line<S: AsyncRead + Unpin>(stream: &mut S) -> Option<String> {
+    let mut line = Vec::new();
+    loop {
+        let mut byte = [0];
+        match stream.read_exact(&mut byte).await {
+            Ok(_) if byte[0] == b'\n' => return Some(String::from_utf8(line).unwrap()),
+            Ok(_) => line.push(byte[0]),
+            Err(_) => return None,
+        }
+    }
 }
 
 #[tokio::test]
@@ -364,6 +460,33 @@ async fn recursive_upload_preserves_contents_and_exact_target_paths() {
         b"unchanged bytes\0\xff"
     );
     assert_eq!(state.files["/target/large"], large);
+    server.abort();
+}
+
+#[tokio::test]
+async fn falls_back_to_streaming_scp_when_sftp_is_rejected() {
+    let (connection, observed, root, server) = fixture_with_sftp(false).await;
+    let source = root.path().join("source");
+    std::fs::create_dir_all(source.join("nested")).unwrap();
+    std::fs::write(source.join("root.txt"), b"root bytes").unwrap();
+    std::fs::write(source.join("nested/child.bin"), b"child\0bytes").unwrap();
+
+    let result = connection
+        .upload(&source, "/fallback-target", true, Duration::from_secs(10))
+        .await
+        .unwrap();
+
+    assert!(result.command.starts_with("scp-protocol "));
+    let state = observed.lock().unwrap();
+    assert!(state.directories.contains(&"/fallback-target".into()));
+    assert!(state
+        .directories
+        .contains(&"/fallback-target/nested".into()));
+    assert_eq!(state.files["/fallback-target/root.txt"], b"root bytes");
+    assert_eq!(
+        state.files["/fallback-target/nested/child.bin"],
+        b"child\0bytes"
+    );
     server.abort();
 }
 

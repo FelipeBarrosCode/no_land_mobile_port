@@ -13,7 +13,7 @@ The user selected reuse of the reference Apple identity: `noland.main.app`, sign
 - Xcode 27 compatibility through the reference project's vendored `swift-rs` 1.0.8, including its documented Swift export fix and licenses. The Cargo lockfile selects the patch.
 - Xcode 27 final linking requires `rustup component add llvm-tools`; the patched `swift-rs` uses `llvm-objcopy` from that component to restore global visibility for Tauri and plugin `@_cdecl` exports.
 - Safe-area layout, touch-friendly form controls, modal bounds, zoom-enabled viewport, reduced-motion handling, and iOS guards for desktop exit/update hooks.
-- Pure-Rust SSH transport in `src-tauri/crates/noland-ssh`: public-key authentication, pinned host keys, concurrent stdin/output, exit status, deadlines, remote PTYs, and streamed recursive SFTP uploads. Commands are not automatically replayed after dispatch.
+- Pure-Rust SSH transport in `src-tauri/crates/noland-ssh`: public-key authentication, pinned host keys, concurrent stdin/output, exit status, deadlines, remote PTYs, and streamed recursive uploads. It prefers SFTP and falls back to the legacy streaming SCP protocol when a provisioned host rejects the SFTP subsystem. Commands are not automatically replayed after dispatch.
 - iOS `RemoteExec` adapter preserving method names, terminal metadata, output/closed events, sudo behavior, and exact upload destinations. A dedicated runtime keeps terminal connections alive independently of blocking command calls.
 - SSH key generation/validation without `ssh-keygen`. iOS private keys are stored in Keychain; the existing private-key path contains an opaque reference. Legacy key files are replaced only after Keychain write/read-back validation. This does not yet implement migration from the older reference app's separate secure-reference schema.
 - UIKit clipboard read/write using explicit existing clipboard actions, including Unicode, embedded NUL, the existing size limit, and main-thread dispatch.
@@ -34,13 +34,14 @@ Passed:
 - `npm run build` (TypeScript and Vite; existing large-chunk warning).
 - `npm run i18n:check` (1,167 keys across nine locale bundles).
 - `npm run check:ios:contracts` (135 baseline commands, 123 baseline frontend exports).
-- `npm run test:ssh` (six tests with a real loopback SSH/SFTP protocol server):
+- `npm run test:ssh` (seven tests with a real loopback SSH/SFTP/SCP protocol server):
   - full-duplex input/output larger than an SSH flow-control window;
   - stderr and exit status arriving after EOF;
   - deadlines without command replay;
   - changed host keys and rejected client keys;
   - PTY negotiation, terminal input, resize, and exit;
   - recursive uploads, empty directories, binary contents, and quoted/Unicode paths;
+  - recursive streaming SCP fallback when the host rejects the SFTP subsystem;
   - UTF-8 split across arbitrary packet boundaries.
 - `cargo check --locked --manifest-path src-tauri/Cargo.toml -p noland-ssh --target aarch64-apple-ios`.
 - `npm run check:ios` now passes for the complete Rust library on the arm64 iOS simulator target, including the Network Extension adapter boundary. It intentionally skips native-media linking and is not an app build.
