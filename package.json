@@ -22,6 +22,7 @@
     "check:ios:contracts": "node scripts/check-ios-contracts.mjs",
     "check:ios:controls": "node scripts/check-ios-controls.mjs",
     "check:ios:release": "node scripts/validate-ios-release.mjs",
+    "set:ios:build-number": "node scripts/set-ios-build-number.mjs",
     "test:ssh": "cargo test --locked --manifest-path src-tauri/Cargo.toml -p noland-ssh",
     "tauri:dev": "node scripts/tauri-with-mic-sidecar.mjs dev",
     "tauri:build": "node scripts/tauri-with-mic-sidecar.mjs build"

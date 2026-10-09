@@ -4,12 +4,13 @@ The repository contains two GitHub Actions workflows:
 
 - `iOS CI` validates the web application, localization, release metadata, opaque
   icon set, native stream backend, contracts, and packet-tunnel extension.
-- `App Store Connect` creates a signed App Store IPA, retains it as a workflow
-  artifact, and optionally uploads it to App Store Connect/TestFlight.
+- `App Store Connect` creates and validates a signed App Store IPA, retains it as
+  a workflow artifact, and uploads it to App Store Connect/TestFlight.
 
-The release workflow is manual and protected by the `app-store` GitHub
-environment. Its upload switch defaults to **off**, so a signing test cannot
-accidentally publish a build.
+The release workflow is protected by the `app-store` GitHub environment. A manual
+run can build without uploading by disabling its upload switch. A pushed tag that
+exactly matches `ios-v<package-version>` always validates and uploads. It does not
+automatically submit a build for App Review.
 
 ## One-time Apple setup
 
@@ -55,6 +56,23 @@ base64 -i app.mobileprovision | pbcopy
 
 Never commit certificates, profiles, API keys, passwords, or generated IPAs.
 
+The environment has been created in this repository. After generating the Apple
+assets, an administrator can populate it from macOS with:
+
+```sh
+base64 -i Distribution.p12 | gh secret set IOS_DISTRIBUTION_CERTIFICATE_BASE64 --env app-store
+gh secret set IOS_DISTRIBUTION_CERTIFICATE_PASSWORD --env app-store
+base64 -i NolandAppStore.mobileprovision | gh secret set IOS_APP_PROVISIONING_PROFILE_BASE64 --env app-store
+base64 -i NolandTunnelAppStore.mobileprovision | gh secret set IOS_TUNNEL_PROVISIONING_PROFILE_BASE64 --env app-store
+gh secret set APPSTORE_ISSUER_ID --env app-store
+gh secret set APPSTORE_KEY_ID --env app-store
+gh secret set APPSTORE_PRIVATE_KEY --env app-store < AuthKey_KEYID.p8
+```
+
+The workflow fails before signing with secret names only—never values—if setup is
+incomplete. It decodes and verifies both profile bundle identifiers, uses an
+ephemeral keychain, and deletes temporary signing material even after failure.
+
 ## Store listing work the owner must supply
 
 The binary pipeline cannot truthfully invent these business/legal materials:
@@ -89,14 +107,27 @@ correct answers.
 
 1. Increment `version` in `package.json` and `src-tauri/tauri.mobile.conf.json`.
    Set the same marketing version for app and extension in
-   `src-tauri/apple/project.yml`; increment both `CFBundleVersion` values.
+   `src-tauri/apple/project.yml`. CI assigns both app and extension a unique build
+   number from the GitHub run number and attempt; do not manually edit build
+   numbers for CI releases.
 2. Run `npm ci`, `npm run build`, and `npm run check:ios:release` locally.
 3. Merge only after `iOS CI` passes.
-4. Run **App Store Connect** with upload disabled. Download and smoke-test the IPA
-   through the appropriate internal distribution path.
-5. Run it again with upload enabled. Wait for App Store Connect processing, then
-   complete export compliance, TestFlight testing, metadata, and review details.
-6. Submit the selected build for review in App Store Connect. Keep manual review
+4. Run **App Store Connect** manually with upload disabled if a signed-archive
+   rehearsal is needed. Download and inspect the retained IPA.
+5. To publish the configured version automatically, create and push the exact tag:
+
+   ```sh
+   version=$(node -p "require('./package.json').version")
+   git tag "ios-v$version"
+   git push origin "ios-v$version"
+   ```
+
+   The workflow verifies the IPA archive, bundle/version/build numbers, app and
+   extension signatures, provisioning profiles, privacy manifest, and packet
+   tunnel entitlements. It then runs Apple's validation before uploading.
+6. Wait for App Store Connect processing, perform TestFlight testing, and complete
+   export compliance, metadata, privacy, and review details.
+7. Submit the selected build for review in App Store Connect. Keep review
    submission until the listing, legal answers, billing model, and entitlement
    approval are complete.
 

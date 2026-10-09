@@ -1,13 +1,22 @@
 name: App Store Connect
 
 on:
+  push:
+    tags:
+      - "ios-v*"
   workflow_dispatch:
     inputs:
       upload:
         description: Upload the signed IPA to TestFlight/App Store Connect
         required: true
         type: boolean
-        default: false
+        default: true
+
+permissions:
+  contents: read
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 concurrency:
   group: app-store-connect
@@ -40,8 +49,39 @@ jobs:
         run: brew install xcodegen
       - name: Install JavaScript dependencies
         run: npm ci
-      - name: Validate release inputs
-        run: npm run check:ios:release
+      - name: Set and validate release version
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" != "ios-v$version" ]]; then
+            echo "Tag $GITHUB_REF_NAME must match package version ios-v$version" >&2
+            exit 1
+          fi
+          build_number=$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
+          npm run set:ios:build-number -- "$build_number"
+          npm run check:ios:release
+          {
+            echo "version=$version"
+            echo "build_number=$build_number"
+          } >> "$GITHUB_OUTPUT"
+      - name: Require App Store secrets
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_PASSWORD }}
+          APP_PROFILE_BASE64: ${{ secrets.IOS_APP_PROVISIONING_PROFILE_BASE64 }}
+          TUNNEL_PROFILE_BASE64: ${{ secrets.IOS_TUNNEL_PROVISIONING_PROFILE_BASE64 }}
+          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
+          APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for name in CERTIFICATE_BASE64 CERTIFICATE_PASSWORD APP_PROFILE_BASE64 TUNNEL_PROFILE_BASE64 APPSTORE_ISSUER_ID APPSTORE_KEY_ID APPSTORE_PRIVATE_KEY; do
+            if [[ -z "${!name:-}" ]]; then echo "$name: missing" >&2; missing=1; else echo "$name: present"; fi
+          done
+          test "$missing" -eq 0
       - name: Import App Store signing assets
         env:
           CERTIFICATE_BASE64: ${{ secrets.IOS_DISTRIBUTION_CERTIFICATE_BASE64 }}
@@ -52,23 +92,38 @@ jobs:
           set -euo pipefail
           KEYCHAIN="$RUNNER_TEMP/noland-signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
-          echo "$CERTIFICATE_BASE64" | base64 -D > "$RUNNER_TEMP/distribution.p12"
-          echo "$APP_PROFILE_BASE64" | base64 -D > "$RUNNER_TEMP/app.mobileprovision"
-          echo "$TUNNEL_PROFILE_BASE64" | base64 -D > "$RUNNER_TEMP/tunnel.mobileprovision"
+          printf '%s' "$CERTIFICATE_BASE64" | base64 -D > "$RUNNER_TEMP/distribution.p12"
+          printf '%s' "$APP_PROFILE_BASE64" | base64 -D > "$RUNNER_TEMP/app.mobileprovision"
+          printf '%s' "$TUNNEL_PROFILE_BASE64" | base64 -D > "$RUNNER_TEMP/tunnel.mobileprovision"
+          security cms -D -i "$RUNNER_TEMP/app.mobileprovision" > "$RUNNER_TEMP/app-profile.plist"
+          security cms -D -i "$RUNNER_TEMP/tunnel.mobileprovision" > "$RUNNER_TEMP/tunnel-profile.plist"
+          app_identifier="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$RUNNER_TEMP/app-profile.plist")"
+          tunnel_identifier="$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:application-identifier' "$RUNNER_TEMP/tunnel-profile.plist")"
+          [[ "$app_identifier" == "U66WLT4SP6.noland.main.app" ]]
+          [[ "$tunnel_identifier" == "U66WLT4SP6.noland.main.app.PacketTunnel" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' "$RUNNER_TEMP/app-profile.plist")" == "false" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' "$RUNNER_TEMP/tunnel-profile.plist")" == "false" ]]
+          /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.networking.networkextension:0' "$RUNNER_TEMP/app-profile.plist" | grep -qx 'packet-tunnel-provider'
+          /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.networking.networkextension:0' "$RUNNER_TEMP/tunnel-profile.plist" | grep -qx 'packet-tunnel-provider'
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security import "$RUNNER_TEMP/distribution.p12" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$KEYCHAIN"
           security set-key-partition-list -S apple-tool:,apple: -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security find-identity -v -p codesigning "$KEYCHAIN" | grep -E 'Apple Distribution|iPhone Distribution'
+          security default-keychain -d user -s "$KEYCHAIN"
           security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
           mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          cp "$RUNNER_TEMP/app.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/app.mobileprovision"
-          cp "$RUNNER_TEMP/tunnel.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/tunnel.mobileprovision"
+          app_uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/app-profile.plist")"
+          tunnel_uuid="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/tunnel-profile.plist")"
+          cp "$RUNNER_TEMP/app.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$app_uuid.mobileprovision"
+          cp "$RUNNER_TEMP/tunnel.mobileprovision" "$HOME/Library/MobileDevice/Provisioning Profiles/$tunnel_uuid.mobileprovision"
+          echo "NOLAND_SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
       - name: Generate Xcode project and signed App Store IPA
         run: |
           npm run tauri:ios:init
           npm run tauri:ios:build -- --target aarch64 --ci --export-method app-store-connect
-      - name: Locate and verify IPA
+      - name: Locate and verify signed IPA
         id: ipa
         run: |
           set -euo pipefail
@@ -76,14 +131,33 @@ jobs:
           test -n "$IPA"
           echo "path=$IPA" >> "$GITHUB_OUTPUT"
           unzip -t "$IPA" >/dev/null
+          PAYLOAD="$RUNNER_TEMP/ipa-payload"
+          rm -rf "$PAYLOAD" && mkdir -p "$PAYLOAD"
+          unzip -q "$IPA" -d "$PAYLOAD"
+          APP="$(find "$PAYLOAD/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          EXTENSION="$APP/PlugIns/NolandPacketTunnel.appex"
+          test -d "$APP" && test -d "$EXTENSION"
+          test -f "$APP/PrivacyInfo.xcprivacy"
+          test -f "$APP/embedded.mobileprovision"
+          test -f "$EXTENSION/embedded.mobileprovision"
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")" == "noland.main.app" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$EXTENSION/Info.plist")" == "noland.main.app.PacketTunnel" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")" == "${{ steps.release.outputs.version }}" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist")" == "${{ steps.release.outputs.build_number }}" ]]
+          [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$EXTENSION/Info.plist")" == "${{ steps.release.outputs.build_number }}" ]]
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -d --entitlements :- "$APP" > "$RUNNER_TEMP/app-entitlements.plist"
+          codesign -d --entitlements :- "$EXTENSION" > "$RUNNER_TEMP/tunnel-entitlements.plist"
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.networking.networkextension:0' "$RUNNER_TEMP/app-entitlements.plist" | grep -qx 'packet-tunnel-provider'
+          /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.networking.networkextension:0' "$RUNNER_TEMP/tunnel-entitlements.plist" | grep -qx 'packet-tunnel-provider'
       - uses: actions/upload-artifact@v4
         with:
-          name: noland-connect-ios-${{ github.sha }}
+          name: noland-connect-ios-${{ steps.release.outputs.version }}-${{ steps.release.outputs.build_number }}
           path: ${{ steps.ipa.outputs.path }}
           if-no-files-found: error
           retention-days: 14
       - name: Upload to App Store Connect
-        if: ${{ inputs.upload }}
+        if: ${{ github.event_name == 'push' || inputs.upload }}
         env:
           APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
           APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
@@ -93,4 +167,14 @@ jobs:
           set -euo pipefail
           mkdir -p "$HOME/.appstoreconnect/private_keys"
           printf '%s' "$APPSTORE_PRIVATE_KEY" > "$HOME/.appstoreconnect/private_keys/AuthKey_${APPSTORE_KEY_ID}.p8"
+          chmod 600 "$HOME/.appstoreconnect/private_keys/AuthKey_${APPSTORE_KEY_ID}.p8"
+          xcrun altool --validate-app --type ios --file "$IPA_PATH" --apiKey "$APPSTORE_KEY_ID" --apiIssuer "$APPSTORE_ISSUER_ID"
           xcrun altool --upload-app --type ios --file "$IPA_PATH" --apiKey "$APPSTORE_KEY_ID" --apiIssuer "$APPSTORE_ISSUER_ID"
+      - name: Clean signing material
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/distribution.p12" "$RUNNER_TEMP/app.mobileprovision" "$RUNNER_TEMP/tunnel.mobileprovision"
+          rm -f "$HOME/.appstoreconnect/private_keys/AuthKey_"*.p8
+          if [[ -n "${NOLAND_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$NOLAND_SIGNING_KEYCHAIN" || true
+          fi
