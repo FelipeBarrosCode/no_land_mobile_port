@@ -218,16 +218,25 @@ fn update(window: &tauri::Window, text: &str) {
                 handle: *mut std::ffi::c_void,
                 text: *const std::ffi::c_char,
             );
+            #[cfg(target_os = "ios")]
+            fn noland_ios_active_stream_surface() -> *mut std::ffi::c_void;
         }
-        let Ok(surface) = super::stream_window_surface_descriptor(window) else {
-            return;
-        };
         let Ok(text) = std::ffi::CString::new(text) else {
             return;
         };
-        unsafe {
-            noland_performance_overlay_update(surface.window_handle as *mut _, text.as_ptr())
+        #[cfg(target_os = "ios")]
+        let handle = unsafe { noland_ios_active_stream_surface() };
+        #[cfg(not(target_os = "ios"))]
+        let handle = {
+            let Ok(surface) = super::stream_window_surface_descriptor(window) else {
+                return;
+            };
+            surface.window_handle as *mut _
         };
+        if handle.is_null() {
+            return;
+        }
+        unsafe { noland_performance_overlay_update(handle, text.as_ptr()) };
     }
     #[cfg(test)]
     let _ = (window, text);

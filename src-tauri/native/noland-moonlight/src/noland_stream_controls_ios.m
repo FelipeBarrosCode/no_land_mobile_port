@@ -262,7 +262,9 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   self.scrim.alpha = _drawerProgress;
   self.scrim.hidden = !self.menuVisible;
   self.drawer.hidden = !self.menuVisible;
-  self.menuButton.hidden = self.menuVisible;
+  // The hamburger is only an opener. Remove it for the entire open/dragged-open
+  // state so it doesn't remain as a duplicate control beside the drawer.
+  self.menuButton.hidden = self.menuVisible || _drawerProgress > 0;
   self.padView.hidden = !self.gamepadEnabled || self.menuVisible;
 }
 - (void)setMenuOpen:(BOOL)open animated:(BOOL)animated {

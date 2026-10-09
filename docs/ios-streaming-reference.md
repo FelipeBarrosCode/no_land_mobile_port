@@ -50,7 +50,9 @@ scrim/Resume action. It scrolls within safe areas on smaller displays.
   `UIKeyInput` responder, so ordinary screen/gamepad taps do not summon it.
 - **Performance overlay:** top-right safe-area positioning with 9-point monospaced
   text, 10-point lines, abbreviated metrics, and a text-sized translucent background
-  capped at 245 points wide. Full underlying statistics remain unchanged.
+  capped at 245 points wide. Full underlying statistics remain unchanged. Updates
+  target only the currently presented native stream surface and cannot recreate a
+  stale stream controller after teardown.
 
 Menu gestures cancel video touches without generating clicks. Pointer timers,
 held keys, sticks, and buttons are released on cancellation, focus loss, dismissal

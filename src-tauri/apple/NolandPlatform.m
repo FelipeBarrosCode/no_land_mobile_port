@@ -138,6 +138,19 @@ void *noland_ios_stream_surface(void *root_pointer) {
     return surface;
 }
 
+// Read-only lookup for overlays. Unlike noland_ios_stream_surface(), this never
+// creates a controller after stream teardown or redirects updates to a future
+// stream surface.
+void *noland_ios_active_stream_surface(void) {
+    __block void *surface = NULL;
+    on_main(^{
+        if (streamController && streamController.presentingViewController) {
+            surface = (__bridge void *)streamController.surface;
+        }
+    });
+    return surface;
+}
+
 int noland_ios_stream_present(void) {
     __block int result = -1;
     on_main(^{

@@ -290,6 +290,7 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
     statistics.layer.cornerRadius = 4;
     statistics.layer.masksToBounds = YES;
     statistics.hidden = YES;
+    statistics.userInteractionEnabled = NO;
     statistics.isAccessibilityElement = YES;
     statistics.accessibilityLabel = @"Stream statistics";
     [self addSubview:statistics];
@@ -1520,6 +1521,14 @@ void noland_performance_overlay_update(void* handle, const char* text) {
     label.accessibilityValue = value;
     label.hidden = value.length == 0;
     [label.superview setNeedsLayout];
+    [label.superview layoutIfNeeded];
+    [label.superview bringSubviewToFront:label];
+    // Keep controls above the non-interactive overlay whenever the drawer or
+    // on-screen gamepad is visible.
+    NolandStreamView* streamView = [label.superview isKindOfClass:NolandStreamView.class]
+        ? (NolandStreamView*)label.superview : nil;
+    if (streamView.controls.menuVisible || streamView.controls.gamepadEnabled)
+      [streamView bringSubviewToFront:streamView.controls];
   });
 }
 
