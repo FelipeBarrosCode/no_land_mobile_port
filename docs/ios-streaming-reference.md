@@ -20,7 +20,7 @@ Moonlight iOS is GPL-3.0, compatible with this repository's GPL-3.0-only license
 ## Native stream controls (2026-10-09)
 
 `noland_stream_controls_ios.m` implements No Land's requested in-stream drawer.
-Swipe in from the left edge, tap with three fingers on the video, or use the
+Swipe left-to-right from the left edge/safe-area strip, tap with three fingers on the video, or use the
 44-point menu button. The drawer can be dragged closed or dismissed via its
 scrim/Resume action. It scrolls within safe areas on smaller displays.
 
@@ -34,11 +34,14 @@ scrim/Resume action. It scrolls within safe areas on smaller displays.
 - **On-screen controller:** two analog sticks, D-pad (including diagonals),
   ABXY, shoulders, digital LT/RT, L3/R3, Select/Start. Uses the same Moonlight
   controller arrival/state API as physical controllers and allocates a free
-  controller slot. Unoccupied screen regions continue to accept pointer input.
+  controller slot. Visible controls take touch priority; finger-to-cursor input
+  is suppressed while the controller overlay is enabled, including empty regions.
 - **Keyboard / Return to Noland:** available within the drawer. The keyboard has
   a Done toolbar and hides the overlay while visible. ASCII characters use
   virtual key pairs; non-ASCII text uses UTF-8. Hardware keys handled by Moonlight
-  are not also delivered to UIKit's text insertion path.
+  are not also delivered to UIKit's text insertion path. Only the menu's Keyboard
+  action activates a separate, gated text responder; the video view is not a
+  `UIKeyInput` responder, so ordinary screen/gamepad taps do not summon it.
 - **Performance overlay:** top-right safe-area positioning with 9-point monospaced
   text, 10-point lines, abbreviated metrics, and a text-sized translucent background
   capped at 245 points wide. Full underlying statistics remain unchanged.
@@ -54,6 +57,10 @@ pinned upstream version has an identical menu.
 
 Verified: native iOS streaming compile, signed iPhone build/export, and the
 standalone `tests/ios_keyboard_test.c` regression (all printable ASCII, letter
-case/modifiers, punctuation, Return/Tab, and non-ASCII fallback). Gestures,
-multi-touch gamepad behavior and keyboard results still need live stream testing
-on the installed device build.
+case/modifiers, punctuation, Return/Tab, and non-ASCII fallback).
+`node scripts/check-ios-controls.mjs <simulator-UDID>` also passes UIKit checks
+for hidden/visible hit targets, simultaneous button state and independent release,
+gamepad exclusion from menu gestures, no keyboard requests from button actions,
+menu interception, and cleanup. This harness uses the real overlay with synthetic
+touch targets/control actions; physical gestures, host-side gamepad response and
+keyboard results still need live stream testing on the installed device build.

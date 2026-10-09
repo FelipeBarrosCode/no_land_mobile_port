@@ -80,7 +80,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
 @property(nonatomic, strong) NolandTouchStick* rightStick;
 @property(nonatomic, strong) NolandTouchStick* dpad;
 @property(nonatomic, strong) NSMutableArray<UIButton*>* padButtons;
-@property(nonatomic, strong) UIScreenEdgePanGestureRecognizer* edgePan;
+@property(nonatomic, strong) UIPanGestureRecognizer* edgePan;
 @property(nonatomic, strong) UITapGestureRecognizer* threeFingerTap;
 @property(nonatomic, weak) UIView* gestureView;
 @end
@@ -103,6 +103,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   self.gamepadEnabled = [NSUserDefaults.standardUserDefaults boolForKey:GamepadKey];
   self.padButtons = [NSMutableArray array];
   self.padView = [NolandPassthroughView new];
+  self.padView.multipleTouchEnabled = YES;
   [self addSubview:self.padView];
   __weak NolandStreamControls* weakSelf = self;
   self.leftStick = [NolandTouchStick new];
@@ -138,6 +139,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
   uint32_t flags[] = {A_FLAG, B_FLAG, X_FLAG, Y_FLAG, LB_FLAG, RB_FLAG, 0, 0, LS_CLK_FLAG, RS_CLK_FLAG, BACK_FLAG, PLAY_FLAG};
   for (NSUInteger i = 0; i < titles.count; i++) {
     UIButton* button = [self button:titles[i] action:@selector(ignoreTap)];
+    button.exclusiveTouch = NO;
     button.tag = flags[i];
     button.accessibilityLabel = titles[i];
     button.accessibilityIdentifier = [NSString stringWithFormat:@"stream.pad.%@", titles[i]];
@@ -203,13 +205,23 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
 }
 - (void)ignoreTap {}
 - (UIView*)hitTest:(CGPoint)point withEvent:(UIEvent*)event {
-  UIView* hit = [super hitTest:point withEvent:event];
-  return hit == self ? nil : hit;
+  if (self.hidden || !self.userInteractionEnabled || self.alpha < 0.01 || ![self pointInside:point withEvent:event]) return nil;
+  // Establish priority explicitly instead of allowing transparent layers or
+  // the text/video responder to acquire a touch intended for a gamepad button.
+  NSArray<UIView*>* targets = self.menuVisible ? @[self.drawer, self.scrim]
+      : self.gamepadEnabled ? @[self.menuButton, self.padView] : @[self.menuButton];
+  for (UIView* target in targets) {
+    UIView* hit = [target hitTest:[self convertPoint:point toView:target] withEvent:event];
+    if (hit) return hit;
+  }
+  return nil;
 }
 - (void)installGesturesOnView:(UIView*)view {
   self.gestureView = view;
-  self.edgePan = [[UIScreenEdgePanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDrawer:)];
-  self.edgePan.edges = UIRectEdgeLeft;
+  // Accept the left safe-area strip too, so a swipe need not begin on the exact
+  // physical edge (which competes with system gestures/notch exclusion).
+  self.edgePan = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(dragDrawer:)];
+  self.edgePan.maximumNumberOfTouches = 1;
   self.edgePan.delegate = self;
   self.edgePan.delaysTouchesBegan = YES;
   self.edgePan.allowedTouchTypes = @[@(UITouchTypeDirect)];
@@ -223,8 +235,12 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
 }
 - (BOOL)gestureRecognizer:(UIGestureRecognizer*)gesture shouldReceiveTouch:(UITouch*)touch {
   // Gamepad and menu touches never participate in stream menu gestures.
-  if (gesture == self.edgePan || gesture == self.threeFingerTap)
-    return ![touch.view isDescendantOfView:self];
+  if (gesture == self.edgePan || gesture == self.threeFingerTap) {
+    if ([touch.view isDescendantOfView:self]) return NO;
+    if (gesture == self.edgePan)
+      return !self.menuVisible && [touch locationInView:self].x <= MAX(44, self.safeAreaInsets.left + 24);
+    return YES;
+  }
   for (UIView* view = touch.view; view && view != self.drawer; view = view.superview)
     if ([view isKindOfClass:UIControl.class]) return NO;
   return YES;
@@ -232,6 +248,7 @@ static NSString* const GamepadKey = @"noland.stream.gamepad";
 - (BOOL)gestureRecognizerShouldBegin:(UIGestureRecognizer*)gesture {
   if ([gesture isKindOfClass:UIPanGestureRecognizer.class]) {
     CGPoint velocity = [(UIPanGestureRecognizer*)gesture velocityInView:self];
+    if (gesture == self.edgePan) return velocity.x > fabs(velocity.y);
     return fabs(velocity.x) > fabs(velocity.y);
   }
   return YES;

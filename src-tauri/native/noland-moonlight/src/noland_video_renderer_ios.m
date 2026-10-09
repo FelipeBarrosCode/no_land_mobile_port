@@ -28,7 +28,9 @@
 extern bool nl_ios_input_capture_active(void);
 extern void noland_ios_stream_dismiss(void);
 
-@interface NolandStreamView : UIView <UIKeyInput> {
+@class NolandKeyboardResponder;
+
+@interface NolandStreamView : UIView {
   CGPoint _touchLocation;
   CGPoint _originalLocation;
   BOOL _touchMoved;
@@ -40,14 +42,46 @@ extern void noland_ios_stream_dismiss(void);
   uint8_t _pendingClickButton;
   BOOL _suppressTouchSequence;
   BOOL _keyboardVisible;
+  BOOL _gamepadOwnsTouches;
   NSMutableSet<NSNumber*>* _hardwareKeys;
   NSMutableSet<UITouch*>* _surfaceTouches;
 }
 @property (nonatomic, assign) nl_video_renderer_t* renderer;
 @property (nonatomic, strong) NolandStreamControls* controls;
 @property (nonatomic, strong) NSMutableArray<id>* inputObservers;
+@property (nonatomic, strong) NolandKeyboardResponder* keyboardResponder;
 - (void)prepareForRemoval;
 - (void)cancelPointerInput;
+- (void)insertText:(NSString*)text;
+- (void)deleteBackward;
+- (void)hideKeyboard;
+@end
+
+// The video view must not itself conform to UIKeyInput: UIKit may activate a
+// text responder on a touch and summon the keyboard over gamepad controls.
+// Only the explicit Keyboard action can authorize this separate responder.
+@interface NolandKeyboardResponder : UIView <UIKeyInput>
+@property(nonatomic, weak) NolandStreamView* owner;
+@property(nonatomic, assign) BOOL requested;
+@end
+@implementation NolandKeyboardResponder
+- (BOOL)canBecomeFirstResponder { return self.requested; }
+- (BOOL)hasText { return YES; }
+- (void)insertText:(NSString*)text { [self.owner insertText:text]; }
+- (void)deleteBackward { [self.owner deleteBackward]; }
+- (UITextAutocorrectionType)autocorrectionType { return UITextAutocorrectionTypeNo; }
+- (UITextAutocapitalizationType)autocapitalizationType { return UITextAutocapitalizationTypeNone; }
+- (UITextSpellCheckingType)spellCheckingType { return UITextSpellCheckingTypeNo; }
+- (UIEditingInteractionConfiguration)editingInteractionConfiguration { return UIEditingInteractionConfigurationNone; }
+- (UIView*)inputAccessoryView {
+  UIToolbar* toolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, self.owner.bounds.size.width, 44)];
+  toolbar.items = @[[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil],
+    [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self.owner action:@selector(hideKeyboard)]];
+  return toolbar;
+}
+- (void)pressesBegan:(NSSet<UIPress*>*)presses withEvent:(UIPressesEvent*)event { [self.owner pressesBegan:presses withEvent:event]; }
+- (void)pressesEnded:(NSSet<UIPress*>*)presses withEvent:(UIPressesEvent*)event { [self.owner pressesEnded:presses withEvent:event]; }
+- (void)pressesCancelled:(NSSet<UIPress*>*)presses withEvent:(UIPressesEvent*)event { [self.owner pressesCancelled:presses withEvent:event]; }
 @end
 
 @interface NolandControllerInput : NSObject
@@ -241,6 +275,9 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
     _hardwareKeys = [NSMutableSet set];
     _surfaceTouches = [NSMutableSet set];
     self.inputObservers = [NSMutableArray array];
+    self.keyboardResponder = [[NolandKeyboardResponder alloc] initWithFrame:CGRectMake(-2, -2, 1, 1)];
+    self.keyboardResponder.owner = self;
+    [self addSubview:self.keyboardResponder];
 
     UILabel* statistics = [[UILabel alloc] initWithFrame:CGRectZero];
     statistics.tag = 1003;
@@ -265,7 +302,7 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
       [view cancelPointerInput];
       g_controller_input.inputSuspended = visible;
       if (visible) {
-        [view resignFirstResponder];
+        [view hideKeyboard];
         nl_runtime_t* runtime = nl_ios_runtime(view.renderer);
         if (runtime) nl_release_all_input(runtime);
         [view->_hardwareKeys removeAllObjects];
@@ -275,11 +312,17 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
     self.controls.keyboardRequested = ^{ [weakSelf showKeyboard]; };
     self.controls.dashboardRequested = ^{ [weakSelf closeStream]; };
     self.controls.gamepadChanged = ^(BOOL enabled, NolandVirtualGamepadState state) {
+      // Controller mode owns finger input, including contacts outside a button.
+      // Clear any pointer sequence left over from switching modes.
+      NolandStreamView* view = weakSelf;
+      if (!view) return;
+      if (enabled && !view->_gamepadOwnsTouches) [view cancelPointerInput];
+      view->_gamepadOwnsTouches = enabled;
       [g_controller_input sendVirtualGamepad:state enabled:enabled];
     };
     id show = [NSNotificationCenter.defaultCenter addObserverForName:UIKeyboardWillShowNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
       NolandStreamView* view = weakSelf;
-      if (!view || !view.isFirstResponder) return;
+      if (!view || !view.keyboardResponder.isFirstResponder) return;
       view->_keyboardVisible = YES;
       [view cancelPointerInput];
       [view.controls releaseControls];
@@ -340,23 +383,24 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
 - (void)closeStream {
   [self cancelPointerInput];
   [self.controls releaseControls];
+  [self hideKeyboard];
   [self resignFirstResponder];
   g_controller_input.inputSuspended = YES;
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   if (runtime != NULL) nl_release_all_input(runtime);
   noland_ios_stream_dismiss();
 }
-- (void)showKeyboard { [self becomeFirstResponder]; }
-- (UIView*)inputAccessoryView {
-  UIToolbar* toolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, self.bounds.size.width, 44)];
-  toolbar.items = @[[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil],
-    [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(hideKeyboard)]];
-  return toolbar;
+- (void)showKeyboard {
+  [self cancelPointerInput];
+  [self.controls releaseControls];
+  self.keyboardResponder.requested = YES;
+  if (![self.keyboardResponder becomeFirstResponder]) self.keyboardResponder.requested = NO;
 }
-- (void)hideKeyboard { [self resignFirstResponder]; }
-- (UITextAutocorrectionType)autocorrectionType { return UITextAutocorrectionTypeNo; }
-- (UITextAutocapitalizationType)autocapitalizationType { return UITextAutocapitalizationTypeNone; }
-- (UITextSpellCheckingType)spellCheckingType { return UITextSpellCheckingTypeNo; }
+- (void)hideKeyboard {
+  self.keyboardResponder.requested = NO;
+  [self.keyboardResponder resignFirstResponder];
+  if (self.window) [self becomeFirstResponder]; // hardware keys, never a software keyboard
+}
 - (UIEditingInteractionConfiguration)editingInteractionConfiguration { return UIEditingInteractionConfigurationNone; }
 - (void)mouseWheelDiscrete:(UIPanGestureRecognizer*)gesture API_AVAILABLE(ios(13.4)) {
   if (self.controls.menuVisible || _keyboardVisible) return;
@@ -381,7 +425,6 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
   }
 }
 - (BOOL)canBecomeFirstResponder { return YES; }
-- (BOOL)hasText { return YES; }
 - (void)insertText:(NSString*)text {
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   if (runtime != NULL && text.length > 0) {
@@ -455,7 +498,7 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
   return hypot(point.x - _originalLocation.x, point.y - _originalLocation.y) >= 5.0;
 }
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-  if (!nl_ios_input_capture_active() || self.controls.menuVisible || _keyboardVisible) return;
+  if (!nl_ios_input_capture_active() || self.controls.menuVisible || self.controls.gamepadEnabled || _keyboardVisible) return;
   if (_surfaceTouches.count == 0) {
     [self finishPendingClick];
     _touchMoved = NO; _suppressTouchSequence = NO; _peakTouchCount = 0;
@@ -488,7 +531,7 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
   (void)touches;
 }
 - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-  if (!nl_ios_input_capture_active() || self.controls.menuVisible || _keyboardVisible || _suppressTouchSequence) return;
+  if (!nl_ios_input_capture_active() || self.controls.menuVisible || self.controls.gamepadEnabled || _keyboardVisible || _suppressTouchSequence) return;
   NSArray<UITouch*>* all = _surfaceTouches.allObjects;
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   if (runtime == NULL) return;
@@ -520,7 +563,7 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
   for (UITouch* touch in touches) [_surfaceTouches removeObject:touch];
   if (!hadTouches) return;
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
-  if (runtime == NULL || _suppressTouchSequence || self.controls.menuVisible || _keyboardVisible || !nl_ios_input_capture_active()) {
+  if (runtime == NULL || _suppressTouchSequence || self.controls.menuVisible || self.controls.gamepadEnabled || _keyboardVisible || !nl_ios_input_capture_active()) {
     [self cancelPointerInput]; return;
   }
   if (self.controls.touchMode == NolandTouchModeDirect) {
@@ -593,6 +636,7 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
 - (void)prepareForRemoval {
   [self cancelPointerInput];
   [self.controls releaseControls];
+  [self hideKeyboard];
   [self resignFirstResponder];
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   if (runtime != NULL) nl_release_all_input(runtime);
@@ -601,11 +645,12 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
 - (void)didMoveToWindow {
   [super didMoveToWindow];
   if (!self.window) {
+    [self hideKeyboard];
     [self cancelPointerInput]; [self.controls releaseControls];
     [_hardwareKeys removeAllObjects];
   }
   g_controller_input.inputSuspended = !self.window || self.controls.menuVisible;
-  if (self.window) [self.controls refreshGamepad];
+  if (self.window) { [self becomeFirstResponder]; [self.controls refreshGamepad]; }
 }
 - (void)dealloc {
   [_dragTimer invalidate]; [_clickTimer invalidate];
