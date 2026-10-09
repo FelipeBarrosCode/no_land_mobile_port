@@ -10,6 +10,8 @@ pub mod health_check;
 pub mod instance_lifecycle;
 pub mod instance_manager;
 #[cfg(target_os = "ios")]
+mod ios_network;
+#[cfg(target_os = "ios")]
 pub mod ios_platform;
 #[cfg(target_os = "ios")]
 pub mod ios_vpn;

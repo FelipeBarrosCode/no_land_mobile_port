@@ -146,8 +146,11 @@ private final class NolandVPNController {
         let previousDescription = manager.localizedDescription
         let previousEnabled = manager.isEnabled
         let otherManagers = try managers().filter {
-            guard $0 !== manager, let tunnel = $0.protocolConfiguration as? NETunnelProviderProtocol else { return false }
+            guard let tunnel = $0.protocolConfiguration as? NETunnelProviderProtocol else { return false }
+            // loadAllFromPreferences returns new object instances, so object
+            // identity cannot exclude the profile being installed/reconnected.
             return tunnel.providerBundleIdentifier == packetTunnelBundleIdentifier
+                && tunnel.providerConfiguration?["configurationReference"] as? String != request.configurationReference
         }
         let previouslyActiveOthers = otherManagers.filter(active)
         try NolandKeychain.set(request.configuration, account: request.configurationReference)

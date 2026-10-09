@@ -2,6 +2,11 @@
 
 ## Current checkpoint
 
+See [the network pipeline audit](ios-network-audit.md) for device evidence,
+connected-path corrections and outstanding parity gaps. Initial iOS VPN
+activation/handshake has passed on-device; full MTU, Direct/TURN and lifecycle
+behavior still requires end-to-end acceptance.
+
 The port now produces a signed iOS device application with its embedded packet-tunnel extension. Development build 0.1.17 has been installed and launched on an iPhone 13, but it has not yet been validated against a live remote stream, so full behavior parity remains the acceptance requirement in `IOS_MOBILE_PORT_PLAN.md`.
 
 The user selected reuse of the reference Apple identity: `noland.main.app`, signing team `U66WLT4SP6`. The development installation replaced the reference app with that identity. No app has been uploaded to TestFlight or the App Store.
@@ -19,7 +24,7 @@ The user selected reuse of the reference Apple identity: `noland.main.app`, sign
 - UIKit clipboard read/write using explicit existing clipboard actions, including Unicode, embedded NUL, the existing size limit, and main-thread dispatch.
 - UIKit idle-timer control and Darwin interface MTU detection without local executables.
 - A maintained Apple packet-tunnel project template and deterministic `npm run configure:ios` step. It adds the `noland.main.app.PacketTunnel` extension, WireGuardKit, shared Keychain/app-group entitlements, required usage descriptions, and the pinned WireGuard Go bridge build.
-- An iOS Network Extension adapter for the current WireGuard service contract: install/start/reconnect/stop/remove, protected configuration storage, exact runtime identity/fingerprint/endpoint/MTU read-back, handshake and traffic counters, and serialized endpoint/MTU mutation messages. Mutations verify the expected fingerprint, update WireGuardKit, persist to shared Keychain, and roll the running adapter back when secure persistence fails. Before first protection Rust journals and rolls back its local configuration around those mutations; after successful activation the local file is replaced with an opaque Keychain reference and subsequent reads resolve through the protected bridge. This is the client-side foundation for both Direct and Cloudflare TURN endpoints; live transition validation remains untested.
+- An iOS Network Extension adapter for the current WireGuard service contract: install/start/reconnect/stop/remove, protected configuration storage, runtime identity/fingerprint/endpoint/MTU read-back, handshake and traffic counters, and endpoint/MTU mutation messages. Mutations verify the expected fingerprint, update WireGuardKit, persist to shared Keychain, and roll the running adapter back when secure persistence fails. Before first protection Rust journals and rolls back its local configuration around those mutations; after successful activation the local file is replaced with an opaque Keychain reference. The network audit corrected remaining plaintext readers and added native ICMP MTU probes. Provider concurrency/durable transaction handling and live Direct/TURN validation remain open; see the audit for evidence and limitations.
 - An in-app native stream presentation container replacing desktop window setters on iOS, with native controls, a localized Return to stream action, clipboard actions, disconnect, and live FPS/decode summaries.
 - A linked native iOS media stack modeled against Moonlight iOS commit `02dc9780496eeeac6d01c8bbdccb8b6fe71ef28a`: H.264/HEVC `AVSampleBufferDisplayLayer` rendering, Annex-B conversion, IDR recovery, HDR metadata, CADisplayLink pacing, bounded Opus/AVAudioEngine playback, lifecycle/audio interruption recovery, absolute and relative touch, hardware mouse/scroll, expanded keyboard mapping, GameController input and haptics, native statistics overlay, and native microphone RTP/RTCP forwarding. See `docs/ios-streaming-reference.md`.
 - iOS microphone commands now use native AVAudioSession/AudioUnit capture and Opus rather than the desktop GStreamer sidecar, while retaining the existing host-agent/session contracts, mute, bitrate update, metrics, reconnect, and cleanup flows.

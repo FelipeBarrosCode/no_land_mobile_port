@@ -2,7 +2,6 @@ use std::{
     fs,
     net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs, UdpSocket},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -14,7 +13,11 @@ use crate::{
     moonlight::infrastructure::persistence::atomic_file::write_atomically,
 };
 
-use super::{remote_exec::RemoteExec, wireguard::reconnect_local_wireguard_client};
+#[cfg(not(target_os = "ios"))]
+use super::wireguard::reconnect_local_wireguard_client;
+use super::{remote_exec::RemoteExec, wireguard::read_local_wireguard_configuration};
+#[cfg(not(target_os = "ios"))]
+use std::process::{Command, Stdio};
 
 pub(super) const BOOTSTRAP_TUNNEL_MTU: u16 = 1440;
 
@@ -83,28 +86,22 @@ pub(super) async fn tune_connected_tunnel(
     .await
     .map_err(|error| AppError::Command(format!("WireGuard MTU probe task failed: {error}")))?;
 
-    let current_mtu = read_config_mtu(&config_path).unwrap_or(BOOTSTRAP_TUNNEL_MTU);
+    let current_mtu = read_config_mtu(&config_path)
+        .ok_or_else(|| AppError::State("Could not read the configured WireGuard MTU".into()))?;
     let remote_mtu = read_remote_mtu(&remote, &remote_interface).await?;
     if remote_mtu != pending.selection.mtu {
         apply_remote_mtu(&remote, &remote_interface, pending.selection.mtu).await?;
     }
     if current_mtu != pending.selection.mtu {
-        if let Err(error) = write_local_config_mtu(&config_path, pending.selection.mtu) {
-            if remote_mtu != pending.selection.mtu {
-                let _ = apply_remote_mtu(&remote, &remote_interface, remote_mtu).await;
-            }
-            return Err(error);
-        }
-        if let Err(error) = reconnect_local_wireguard_client(&config_path) {
-            let local_rollback = write_local_config_mtu(&config_path, current_mtu)
-                .and_then(|()| reconnect_local_wireguard_client(&config_path));
+        if let Err(error) = apply_local_mtu(config_path.clone(), pending.selection.mtu).await {
+            let local_rollback = apply_local_mtu(config_path.clone(), current_mtu).await;
             let remote_rollback = if remote_mtu != pending.selection.mtu {
                 apply_remote_mtu(&remote, &remote_interface, remote_mtu).await
             } else {
                 Ok(())
             };
             return Err(AppError::Command(format!(
-                "Could not restart the selected tunnel MTU: {error}; local rollback: {}; remote rollback: {}",
+                "Could not apply the selected tunnel MTU: {error}; local rollback: {}; remote rollback: {}",
                 result_label(&local_rollback),
                 result_label(&remote_rollback)
             )));
@@ -256,6 +253,26 @@ async fn apply_remote_mtu(remote: &RemoteExec, remote_interface: &str, mtu: u16)
     Ok(())
 }
 
+async fn apply_local_mtu(config_path: PathBuf, mtu: u16) -> AppResult<()> {
+    tokio::task::spawn_blocking(move || {
+        #[cfg(target_os = "ios")]
+        {
+            // The local file is an opaque reference after activation. The
+            // provider transaction updates WireGuardKit and shared Keychain,
+            // verifies read-back, and rolls back on persistence failure.
+            super::wireguard::set_managed_gotatun_mtu(&config_path, mtu, uuid::Uuid::new_v4())
+        }
+        #[cfg(not(target_os = "ios"))]
+        {
+            write_local_config_mtu(&config_path, mtu)?;
+            reconnect_local_wireguard_client(&config_path).map(|_| ())
+        }
+    })
+    .await
+    .map_err(|error| AppError::Command(format!("Local MTU update task failed: {error}")))?
+}
+
+#[cfg(not(target_os = "ios"))]
 fn write_local_config_mtu(config_path: &Path, mtu: u16) -> AppResult<()> {
     let config = fs::read_to_string(config_path)?;
     let updated = replace_interface_mtu(&config, mtu).ok_or_else(|| {
@@ -296,7 +313,7 @@ fn replace_interface_mtu(config: &str, mtu: u16) -> Option<String> {
 }
 
 fn read_config_mtu(config_path: &Path) -> Option<u16> {
-    let config = fs::read_to_string(config_path).ok()?;
+    let config = read_local_wireguard_configuration(config_path).ok()?;
     let mut in_interface = false;
     for line in config.lines() {
         let trimmed = line.trim();
@@ -369,6 +386,15 @@ fn search_path_mtu(mut upper_bound: u16, mut probe: impl FnMut(u16) -> bool) -> 
     Some(candidates[low])
 }
 
+#[cfg(target_os = "ios")]
+fn probe_candidate(destination: IpAddr, packet_size: u16) -> bool {
+    super::ios_network::probe_mtu(destination, packet_size, PROBE_COUNT).unwrap_or_else(|error| {
+        tracing::debug!(%error, "Native ICMP MTU probe unavailable");
+        false
+    })
+}
+
+#[cfg(not(target_os = "ios"))]
 fn probe_candidate(destination: IpAddr, packet_size: u16) -> bool {
     let header_size = if destination.is_ipv6() { 48 } else { 28 };
     let Some(payload_size) = packet_size.checked_sub(header_size) else {
@@ -393,6 +419,7 @@ fn probe_candidate(destination: IpAddr, packet_size: u16) -> bool {
         && parse_loss_percent(&combined).is_some_and(|loss| loss <= MAX_ACCEPTABLE_LOSS_PERCENT)
 }
 
+#[cfg(not(target_os = "ios"))]
 fn ping_command(destination: IpAddr, payload_size: u16) -> Command {
     #[cfg(target_os = "windows")]
     {

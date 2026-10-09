@@ -3635,12 +3635,7 @@ fn parse_wireguard_endpoint_from_config(
         return Ok(None);
     }
 
-    let content = std::fs::read_to_string(config_path).map_err(|error| {
-        AppError::Command(format!(
-            "Failed reading WireGuard client config {}: {error}",
-            config_path.display()
-        ))
-    })?;
+    let content = crate::services::wireguard::read_local_wireguard_configuration(config_path)?;
 
     let endpoint_line = content
         .lines()

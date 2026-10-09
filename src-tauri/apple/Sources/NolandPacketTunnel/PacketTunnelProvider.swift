@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 import NetworkExtension
 import WireGuardKit
@@ -38,7 +39,10 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
             let configuration = try NolandWireGuardConfig.parse(text, name: "Noland Connect")
             let computed = fingerprint(text)
-            if let expected = provider["configFingerprint"] as? String, !expected.isEmpty, expected != computed {
+            // The Keychain value is the durable source of truth after live MTU
+            // and endpoint transactions. The profile's initial fingerprint is
+            // stale after those updates; only an explicit start request pins it.
+            if let expected = options?["configFingerprint"] as? String, !expected.isEmpty, expected != computed {
                 throw failure("The protected WireGuard configuration fingerprint is stale.")
             }
             configurationReference = reference
@@ -109,19 +113,23 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         adapter.getRuntimeConfiguration { runtime in
             guard let runtime else { reply(self.errorResponse(self.failure("WireGuard runtime read-back failed."))); return }
             var rx: UInt64 = 0, tx: UInt64 = 0, lastHandshake: UInt64?
+            var endpoint: String?, peerKey: String?
             for line in runtime.split(whereSeparator: { $0.isNewline }) {
                 let pair = line.split(separator: "=", maxSplits: 1).map(String.init)
                 guard pair.count == 2 else { continue }
                 if pair[0] == "rx_bytes" { rx &+= UInt64(pair[1]) ?? 0 }
                 if pair[0] == "tx_bytes" { tx &+= UInt64(pair[1]) ?? 0 }
+                if pair[0] == "endpoint" { endpoint = pair[1] }
+                if pair[0] == "public_key" { peerKey = PublicKey(hexKey: pair[1])?.base64Key }
                 if pair[0] == "last_handshake_time_sec", let value = UInt64(pair[1]), value > 0 {
                     lastHandshake = max(lastHandshake ?? 0, value)
                 }
             }
             let now = UInt64(Date().timeIntervalSince1970)
-            let endpoint = self.currentConfiguration()?.peers.first?.endpoint?.stringRepresentation ?? ""
-            let peerKey = self.currentConfiguration()?.peers.first?.publicKey.base64Key ?? ""
-            let mtu = self.currentConfiguration()?.interface.mtu ?? 0
+            guard let endpoint, let peerKey, let mtu = self.interfaceMtu(adapter.interfaceName) else {
+                reply(self.errorResponse(self.failure("WireGuard endpoint, peer, or interface MTU read-back is unavailable.")))
+                return
+            }
             var response: [String: Any] = [
                 "ok": true, "active": true, "launchId": self.launchID,
                 "configFingerprint": self.configFingerprint, "peerPublicKey": peerKey,
@@ -133,8 +141,22 @@ final class PacketTunnelProvider: NEPacketTunnelProvider {
         }
     }
 
-    private func currentConfiguration() -> TunnelConfiguration? {
-        try? NolandWireGuardConfig.parse(configurationText, name: "Noland Connect")
+    private func interfaceMtu(_ name: String?) -> UInt32? {
+        guard let name else { return nil }
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0 else { return nil }
+        defer { freeifaddrs(first) }
+        var cursor = first
+        while let current = cursor {
+            let entry = current.pointee
+            if let address = entry.ifa_addr, let data = entry.ifa_data,
+               Int32(address.pointee.sa_family) == AF_LINK,
+               String(cString: entry.ifa_name) == name {
+                return data.assumingMemoryBound(to: if_data.self).pointee.ifi_mtu
+            }
+            cursor = entry.ifa_next
+        }
+        return nil
     }
     private func fingerprint(_ text: String) -> String {
         SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined()

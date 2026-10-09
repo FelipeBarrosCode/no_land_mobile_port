@@ -173,7 +173,16 @@ static ACTIVE_GOTATUN_STATUS_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::
 #[cfg(target_os = "ios")]
 static ACTIVE_IOS_CONFIG_PATH: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
 
-fn read_local_wireguard_configuration(config_path: &Path) -> AppResult<String> {
+#[cfg(target_os = "ios")]
+pub(crate) fn active_ios_config_path() -> Option<PathBuf> {
+    ACTIVE_IOS_CONFIG_PATH
+        .get_or_init(|| Mutex::new(None))
+        .lock()
+        .ok()?
+        .clone()
+}
+
+pub(crate) fn read_local_wireguard_configuration(config_path: &Path) -> AppResult<String> {
     let stored = std::fs::read_to_string(config_path).map_err(|error| {
         AppError::Command(format!(
             "Failed reading WireGuard client config {}: {error}",

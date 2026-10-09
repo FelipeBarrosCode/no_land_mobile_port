@@ -196,7 +196,7 @@ fn resolve_edid_profile(
 }
 
 fn parse_wireguard_endpoint_from_config(config_path: &Path) -> Option<(String, u16)> {
-    let content = fs::read_to_string(config_path).ok()?;
+    let content = super::wireguard::read_local_wireguard_configuration(config_path).ok()?;
     let endpoint_line = content
         .lines()
         .map(str::trim)

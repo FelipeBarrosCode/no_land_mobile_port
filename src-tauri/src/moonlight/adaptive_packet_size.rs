@@ -1041,6 +1041,40 @@ struct ManagedTunnelStatus {
     error: Option<String>,
 }
 
+#[cfg(target_os = "ios")]
+fn detect_managed_tunnel(
+    _app_data_dir: &Path,
+    destination_ip: IpAddr,
+) -> Option<ManagedTunnelInfo> {
+    use crate::services::wireguard::{
+        active_ios_config_path, get_managed_gotatun_runtime, read_local_wireguard_configuration,
+    };
+    let path = active_ios_config_path()?;
+    let config = read_local_wireguard_configuration(&path).ok()?;
+    let routes_match = config
+        .lines()
+        .filter_map(|line| line.split_once('='))
+        .filter(|(key, _)| key.trim().eq_ignore_ascii_case("AllowedIPs"))
+        .flat_map(|(_, value)| value.split(','))
+        .any(|route| cidr_contains(route.trim(), destination_ip));
+    if !routes_match {
+        return None;
+    }
+    let runtime = get_managed_gotatun_runtime(&path).ok()?;
+    if !runtime.active
+        || runtime.config_fingerprint != format!("{:x}", Sha256::digest(config.as_bytes()))
+    {
+        return None;
+    }
+    Some(ManagedTunnelInfo {
+        endpoint: runtime.endpoint,
+        peer: runtime.peer_public_key,
+        config_fingerprint: runtime.config_fingerprint,
+        mtu: Some(u32::from(runtime.mtu)),
+    })
+}
+
+#[cfg(not(target_os = "ios"))]
 fn detect_managed_tunnel(app_data_dir: &Path, destination_ip: IpAddr) -> Option<ManagedTunnelInfo> {
     detect_managed_tunnel_in_root(
         &platform_wireguard_root(app_data_dir),
@@ -1324,12 +1358,16 @@ fn interface_mtu(_interface: &str) -> Option<u32> {
 fn interface_mtu(name: &str) -> Option<u32> {
     // Darwin exposes link MTU through getifaddrs; no sandboxed ifconfig process.
     let mut interfaces: *mut libc::ifaddrs = std::ptr::null_mut();
-    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 { return None; }
+    if unsafe { libc::getifaddrs(&mut interfaces) } != 0 {
+        return None;
+    }
     let mut current = interfaces;
     let mut mtu = None;
     while !current.is_null() {
         let entry = unsafe { &*current };
-        if !entry.ifa_name.is_null() && !entry.ifa_addr.is_null() && !entry.ifa_data.is_null()
+        if !entry.ifa_name.is_null()
+            && !entry.ifa_addr.is_null()
+            && !entry.ifa_data.is_null()
             && unsafe { (*entry.ifa_addr).sa_family as i32 } == libc::AF_LINK
             && unsafe { std::ffi::CStr::from_ptr(entry.ifa_name) }.to_bytes() == name.as_bytes()
         {
@@ -1339,7 +1377,9 @@ fn interface_mtu(name: &str) -> Option<u32> {
         }
         current = entry.ifa_next;
     }
-    unsafe { libc::freeifaddrs(interfaces); }
+    unsafe {
+        libc::freeifaddrs(interfaces);
+    }
     mtu
 }
 
