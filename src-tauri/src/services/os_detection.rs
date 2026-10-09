@@ -7,6 +7,7 @@ use crate::utils::managed_binaries::is_executable_file;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OsKind {
+    Ios,
     Macos,
     Linux,
     Windows,
@@ -34,6 +35,7 @@ impl Default for OsDetection {
 impl OsDetection {
     pub fn new() -> Self {
         let os = match std::env::consts::OS {
+            "ios" => OsKind::Ios,
             "macos" => OsKind::Macos,
             "linux" => OsKind::Linux,
             "windows" => OsKind::Windows,
@@ -65,6 +67,7 @@ impl OsDetection {
 
     pub fn platform_display_name(&self) -> &'static str {
         match self.os {
+            OsKind::Ios => "iOS device",
             OsKind::Macos => "Mac",
             OsKind::Linux => "Linux machine",
             OsKind::Windows => "Windows machine",

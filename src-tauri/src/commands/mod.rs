@@ -32,6 +32,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+#[cfg(not(target_os = "ios"))]
+use crate::services::wireguard::{locate_noland_net_helper_binary, locate_wintun_library};
 use crate::{
     errors::{AppError, AppResult, FrontendError},
     input::{
@@ -111,7 +113,6 @@ use crate::{
         sunshine::{generate_headless_edid_base64, EDID_MAX_REFRESH_HZ, EDID_MIN_REFRESH_HZ},
         vast_api::VastApiClient,
         wireguard::{
-            locate_noland_net_helper_binary, locate_wintun_library,
             reconnect_local_wireguard_client, setup_local_wireguard_client,
             teardown_local_wireguard_client, verify_managed_gotatun_tunnel, WireGuardProvisionMode,
             WireGuardService,
@@ -369,43 +370,78 @@ pub struct MoonlightControllerStateInput {
 
 fn local_environment_check(_attempt_install: bool) -> LocalEnvironmentCheck {
     let os = OsDetection::new();
-    let bundled_check = |tool: &str, required_for: &str, resolved_path: Option<PathBuf>| {
+    #[cfg(target_os = "ios")]
+    let checks = vec![
         ToolCheck {
-            tool: tool.to_string(),
-            found: resolved_path.is_some(),
-            path: resolved_path.map(|path| path.display().to_string()),
-            required_for: required_for.to_string(),
-            install_hint: "This component is bundled with Noland Connect. Reinstall the app or report the package as incomplete; do not install it manually.".to_string(),
+            tool: "native-ssh-sftp".to_string(),
+            found: true,
+            path: Some("in-process noland-ssh + russh-sftp".to_string()),
+            required_for: "remote commands, terminal sessions, provisioning, and uploads".to_string(),
+            install_hint: "This implementation is linked into the iOS app and does not use local ssh or scp executables.".to_string(),
             install_attempted: false,
             install_error: None,
-        }
-    };
-
-    let managed_ssh =
-        os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows"));
-    let managed_ssh_keygen = os.locate_app_managed_binary(
-        "ssh-keygen",
-        "NOLAND_SSH_KEYGEN_BIN",
-        cfg!(target_os = "windows"),
-    );
-
-    let mut checks = vec![
-        bundled_check("ssh", "remote commands and provisioning", managed_ssh),
-        bundled_check("ssh-keygen", "SSH key generation", managed_ssh_keygen),
+        },
+        ToolCheck {
+            tool: "native-ssh-keygen".to_string(),
+            found: true,
+            path: Some("Rust Ed25519 + iOS Keychain".to_string()),
+            required_for: "SSH key generation and protected storage".to_string(),
+            install_hint: "This implementation is linked into the iOS app and does not use ssh-keygen.".to_string(),
+            install_attempted: false,
+            install_error: None,
+        },
+        ToolCheck {
+            tool: "NolandPacketTunnel.appex".to_string(),
+            found: crate::services::ios_platform::packet_tunnel_available(),
+            path: Some("noland.main.app.PacketTunnel".to_string()),
+            required_for: "WireGuard Direct and Cloudflare TURN tunnel transports".to_string(),
+            install_hint: "The signed Network Extension must be embedded in the installed iOS app.".to_string(),
+            install_attempted: false,
+            install_error: None,
+        },
     ];
 
-    checks.push(bundled_check(
-        "noland-net-helper",
-        "embedded GotaTun tunnel engine and network configuration",
-        locate_noland_net_helper_binary(),
-    ));
-    if os.is_windows() {
+    #[cfg(not(target_os = "ios"))]
+    let checks = {
+        let bundled_check = |tool: &str, required_for: &str, resolved_path: Option<PathBuf>| {
+            ToolCheck {
+                tool: tool.to_string(),
+                found: resolved_path.is_some(),
+                path: resolved_path.map(|path| path.display().to_string()),
+                required_for: required_for.to_string(),
+                install_hint: "This component is bundled with Noland Connect. Reinstall the app or report the package as incomplete; do not install it manually.".to_string(),
+                install_attempted: false,
+                install_error: None,
+            }
+        };
+
+        let managed_ssh =
+            os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows"));
+        let managed_ssh_keygen = os.locate_app_managed_binary(
+            "ssh-keygen",
+            "NOLAND_SSH_KEYGEN_BIN",
+            cfg!(target_os = "windows"),
+        );
+
+        let mut checks = vec![
+            bundled_check("ssh", "remote commands and provisioning", managed_ssh),
+            bundled_check("ssh-keygen", "SSH key generation", managed_ssh_keygen),
+        ];
+
         checks.push(bundled_check(
-            "wintun.dll",
-            "Windows virtual network adapter for the embedded GotaTun engine",
-            locate_wintun_library(),
+            "noland-net-helper",
+            "embedded GotaTun tunnel engine and network configuration",
+            locate_noland_net_helper_binary(),
         ));
-    }
+        if os.is_windows() {
+            checks.push(bundled_check(
+                "wintun.dll",
+                "Windows virtual network adapter for the embedded GotaTun engine",
+                locate_wintun_library(),
+            ));
+        }
+        checks
+    };
 
     let arch = match os.arch() {
         crate::services::os_detection::ArchKind::X64 => "x64",

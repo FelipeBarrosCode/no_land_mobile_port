@@ -1,4 +1,6 @@
 #import <UIKit/UIKit.h>
+#import <AVFoundation/AVFoundation.h>
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -39,6 +41,46 @@ char *noland_ios_clipboard_write(const unsigned char *bytes, size_t length) {
 
 void noland_ios_keep_awake(bool active) {
     on_main(^{ UIApplication.sharedApplication.idleTimerDisabled = active; });
+}
+
+int noland_ios_detect_main_display(uint32_t *width, uint32_t *height, uint32_t *refresh_hz) {
+    if (!width || !height || !refresh_hz) return 0;
+    __block CGRect nativeBounds = CGRectZero;
+    __block NSInteger maximumFramesPerSecond = 0;
+    on_main(^{
+        UIScreen *screen = UIScreen.mainScreen;
+        nativeBounds = screen.nativeBounds;
+        maximumFramesPerSecond = screen.maximumFramesPerSecond;
+    });
+    uint32_t first = (uint32_t)llround(CGRectGetWidth(nativeBounds));
+    uint32_t second = (uint32_t)llround(CGRectGetHeight(nativeBounds));
+    if (first == 0 || second == 0) return 0;
+    // Management may be portrait, but the native stream surface is landscape.
+    *width = MAX(first, second);
+    *height = MIN(first, second);
+    *refresh_hz = (uint32_t)MAX(maximumFramesPerSecond, 60);
+    return 1;
+}
+
+int noland_ios_packet_tunnel_available(void) {
+    __block int available = 0;
+    on_main(^{
+        NSURL *plugins = NSBundle.mainBundle.builtInPlugInsURL;
+        NSURL *extensionURL = [plugins URLByAppendingPathComponent:@"NolandPacketTunnel.appex"];
+        NSBundle *extension = extensionURL ? [NSBundle bundleWithURL:extensionURL] : nil;
+        available = [extension.bundleIdentifier isEqualToString:@"noland.main.app.PacketTunnel"] ? 1 : 0;
+    });
+    return available;
+}
+
+int noland_ios_microphone_permission_status(void) {
+    __block AVAudioSessionRecordPermission permission = AVAudioSessionRecordPermissionUndetermined;
+    on_main(^{ permission = AVAudioSession.sharedInstance.recordPermission; });
+    switch (permission) {
+        case AVAudioSessionRecordPermissionGranted: return 2;
+        case AVAudioSessionRecordPermissionDenied: return 1;
+        default: return 0;
+    }
 }
 
 void noland_ios_response_free(char *value) { free(value); }

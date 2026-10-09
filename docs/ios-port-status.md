@@ -2,9 +2,9 @@
 
 ## Current checkpoint
 
-The port now produces a signed iOS device application with its embedded packet-tunnel extension. It has not yet been installed over the reused app identity or validated against a live remote stream, so full behavior parity remains the acceptance requirement in `IOS_MOBILE_PORT_PLAN.md`.
+The port now produces a signed iOS device application with its embedded packet-tunnel extension. Development build 0.1.17 has been installed and launched on an iPhone 13, but it has not yet been validated against a live remote stream, so full behavior parity remains the acceptance requirement in `IOS_MOBILE_PORT_PLAN.md`.
 
-The user selected reuse of the reference Apple identity: `noland.main.app`, signing team `U66WLT4SP6`. Installing this identity can replace the reference app. No app has been installed or uploaded during this work.
+The user selected reuse of the reference Apple identity: `noland.main.app`, signing team `U66WLT4SP6`. The development installation replaced the reference app with that identity. No app has been uploaded to TestFlight or the App Store.
 
 ## Implemented
 
@@ -23,6 +23,7 @@ The user selected reuse of the reference Apple identity: `noland.main.app`, sign
 - An in-app native stream presentation container replacing desktop window setters on iOS, with native controls, a localized Return to stream action, clipboard actions, disconnect, and live FPS/decode summaries.
 - A linked native iOS media stack modeled against Moonlight iOS commit `02dc9780496eeeac6d01c8bbdccb8b6fe71ef28a`: H.264/HEVC `AVSampleBufferDisplayLayer` rendering, Annex-B conversion, IDR recovery, HDR metadata, CADisplayLink pacing, bounded Opus/AVAudioEngine playback, lifecycle/audio interruption recovery, absolute and relative touch, hardware mouse/scroll, expanded keyboard mapping, GameController input and haptics, native statistics overlay, and native microphone RTP/RTCP forwarding. See `docs/ios-streaming-reference.md`.
 - iOS microphone commands now use native AVAudioSession/AudioUnit capture and Opus rather than the desktop GStreamer sidecar, while retaining the existing host-agent/session contracts, mute, bitrate update, metrics, reconnect, and cleanup flows.
+- iOS health and environment checks report and validate the actual native replacements rather than incorrectly requiring desktop sidecars: in-process SSH/SFTP, Rust/Keychain Ed25519 generation and read-back, the embedded packet-tunnel extension, native microphone availability/permission, and UIKit display dimensions/refresh rate.
 - Mobile resources retain the remote-agent source trees needed by provisioning; desktop sidecar executables are excluded.
 - A baseline removal guard for all 135 original registered commands and 123 exported frontend functions. This checks names, not runtime behavior or serialized shape parity.
 
@@ -47,6 +48,7 @@ Passed:
 - `npm run check:ios:streaming` independently configures and builds that native stack in Release mode for the arm64 iOS Simulator SDK.
 - `npm run tauri:ios:build -- --debug --target aarch64 --ci --export-method debugging` completes Xcode compilation, final application linking, development signing, embedded-extension validation, and export for the configured Apple team.
 - The exported development IPA contains the signed `NolandConnectMobile.app` and embedded `NolandPacketTunnel.appex`; generated archives and IPAs remain ignored and are not committed.
+- Development build 0.1.17 was installed and launched on a connected iPhone 13; installation and process presence were verified with `devicectl`.
 - Code-signature inspection confirms the main app and extension share the expected app group and Keychain group, and the extension carries the `packet-tunnel-provider` entitlement.
 - The `NolandPacketTunnel` extension, WireGuardKit Swift package, and pinned WireGuard Go archive compile for arm64 iOS Simulator through the dedicated `NolandPacketTunnelOnly` scheme. The app-side VPN bridge also passes standalone Swift type-checking against that module.
 - Desktop Rust library check with native media and absent bundle artifacts excluded (not a linked desktop build):
@@ -59,12 +61,12 @@ Passed:
 
 The installed Xcode has the iOS 27 SDK but only an iOS 26.3 simulator runtime, so Tauri's simulator wrapper refuses to launch until a matching runtime is installed. The native simulator library and packet-tunnel target compile independently.
 
-Not run: app installation (which would replace the reference app because the identity is reused), physical-device behavior tests, Keychain migration tests on-device, live SSH provisioning against a real workstation, live game streaming, or TestFlight delivery.
+Not run: complete physical-device workflow tests, Keychain migration tests on-device, live SSH provisioning against a real workstation, live game streaming, or TestFlight delivery.
 
 ## Remaining work
 
 1. Complete VPN lifecycle reconciliation after extension termination, app suspension, and network changes, then test Direct/TURN transitions, failed mutation rollback, allocation expiry, protected-reference migration, and traffic continuity on a signed physical device.
-2. Implement document-picker/security-scoped access, OAuth handoff, diagnostics sharing, mobile health checks, and app lifecycle reconciliation. Remove remaining local process assumptions from iOS paths.
+2. Implement document-picker/security-scoped access, OAuth handoff, diagnostics sharing, and app lifecycle reconciliation. Remove remaining local process assumptions from iOS paths.
 3. Complete migration and secure persistence for other state secrets and the older mobile-reference schema; test upgrades before installing over that app identity.
 4. Exercise every feature in the plan on simulator and device, including real H.264/HEVC streams, touch/mouse/keyboard/controllers, haptics, audio route changes, microphone interruptions, and all failure/recovery cases. Add signed CI/TestFlight delivery only after those requirements pass.
 

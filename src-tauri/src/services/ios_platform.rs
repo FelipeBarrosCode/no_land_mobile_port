@@ -6,6 +6,8 @@ unsafe extern "C" {
     fn noland_ios_clipboard_read() -> *mut c_char;
     fn noland_ios_clipboard_write(bytes: *const u8, length: usize) -> *mut c_char;
     fn noland_ios_keep_awake(active: bool);
+    fn noland_ios_packet_tunnel_available() -> i32;
+    fn noland_ios_microphone_permission_status() -> i32;
     fn noland_ios_response_free(value: *mut c_char);
 }
 
@@ -48,6 +50,25 @@ pub fn write_clipboard(text: &str) -> AppResult<()> {
 pub fn keep_awake(active: bool) {
     unsafe {
         noland_ios_keep_awake(active);
+    }
+}
+
+pub fn packet_tunnel_available() -> bool {
+    unsafe { noland_ios_packet_tunnel_available() != 0 }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MicrophonePermission {
+    Undetermined,
+    Denied,
+    Granted,
+}
+
+pub fn microphone_permission() -> MicrophonePermission {
+    match unsafe { noland_ios_microphone_permission_status() } {
+        2 => MicrophonePermission::Granted,
+        1 => MicrophonePermission::Denied,
+        _ => MicrophonePermission::Undetermined,
     }
 }
 

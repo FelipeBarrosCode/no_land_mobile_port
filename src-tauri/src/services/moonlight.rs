@@ -1,8 +1,18 @@
+#[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
 use std::process::Command;
 
 #[cfg(target_os = "macos")]
 unsafe extern "C" {
     fn noland_macos_detect_main_display(
+        width: *mut u32,
+        height: *mut u32,
+        refresh_hz: *mut u32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "ios")]
+unsafe extern "C" {
+    fn noland_ios_detect_main_display(
         width: *mut u32,
         height: *mut u32,
         refresh_hz: *mut u32,
@@ -47,6 +57,22 @@ pub(crate) fn detect_hardware_display_for_provisioning() -> Option<(u32, u32, u3
 }
 
 fn detect_display() -> Option<DisplayDetection> {
+    #[cfg(target_os = "ios")]
+    {
+        let mut width = 0u32;
+        let mut height = 0u32;
+        let mut refresh_hz = 0u32;
+        let detected =
+            unsafe { noland_ios_detect_main_display(&mut width, &mut height, &mut refresh_hz) };
+        if detected != 0 && width > 0 && height > 0 {
+            return Some(DisplayDetection {
+                width,
+                height,
+                refresh_rate_hz: refresh_hz.max(60),
+            });
+        }
+    }
+
     #[cfg(target_os = "macos")]
     {
         let mut width = 0u32;

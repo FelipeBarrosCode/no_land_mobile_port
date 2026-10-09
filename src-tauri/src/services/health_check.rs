@@ -3,6 +3,10 @@ use std::{fs, path::Path, time::Duration};
 use serde::Serialize;
 use tauri::{AppHandle, Manager};
 
+#[cfg(not(target_os = "ios"))]
+use crate::services::wireguard::locate_noland_net_helper_binary;
+#[cfg(target_os = "ios")]
+use crate::services::{ios_platform::MicrophonePermission, ssh_keys::SshKeyService};
 use crate::{
     models::app_state::PersistedAppState,
     services::{
@@ -10,7 +14,7 @@ use crate::{
         moonlight::detect_client_display_for_provisioning,
         os_detection::{ArchKind, OsDetection},
         shared_storage::agent_runtime::locate_state_agent_source_dir,
-        wireguard::{locate_noland_net_helper_binary, locate_wintun_library},
+        wireguard::locate_wintun_library,
     },
 };
 
@@ -316,115 +320,232 @@ pub async fn run_system_health_report(app: &AppHandle, context: &AppContext) -> 
 
     probes.push(state_probe(&state));
 
-    let managed_ssh =
-        os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows"));
-    probes.push(match managed_ssh {
-        Some(path) => ok_probe(
-            "binary.ssh",
-            "Managed SSH client",
-            "bundled binaries",
-            "Bundled SSH client found.",
-            Some(path.display().to_string()),
-        ),
-        None => failed_probe(
-            "binary.ssh",
-            "Managed SSH client",
-            "bundled binaries",
-            "Bundled SSH client is missing.",
-            None,
-            Some(
-                "Reinstall or rebuild Noland Connect so ssh is packaged in app resources."
-                    .to_string(),
-            ),
-        ),
-    });
-
-    let managed_scp =
-        os.locate_app_managed_binary("scp", "NOLAND_SCP_BIN", cfg!(target_os = "windows"));
-    probes.push(match managed_scp {
-        Some(path) => ok_probe(
-            "binary.scp",
-            "Managed SCP client",
-            "bundled binaries",
-            "Bundled SCP client found.",
-            Some(path.display().to_string()),
-        ),
-        None => failed_probe(
-            "binary.scp",
-            "Managed SCP client",
-            "bundled binaries",
-            "Bundled SCP client is missing.",
-            None,
-            Some(
-                "Reinstall or rebuild Noland Connect so scp is packaged in app resources."
-                    .to_string(),
-            ),
-        ),
-    });
-
-    let managed_ssh_keygen = os.locate_app_managed_binary(
-        "ssh-keygen",
-        "NOLAND_SSH_KEYGEN_BIN",
-        cfg!(target_os = "windows"),
-    );
-    probes.push(match managed_ssh_keygen {
-        Some(path) => ok_probe(
-            "binary.ssh_keygen",
-            "Managed SSH key generator",
-            "bundled binaries",
-            "Bundled ssh-keygen found.",
-            Some(path.display().to_string()),
-        ),
-        None => failed_probe(
-            "binary.ssh_keygen",
-            "Managed SSH key generator",
-            "bundled binaries",
-            "Bundled ssh-keygen is missing.",
-            None,
-            Some(
-                "Reinstall or rebuild Noland Connect so ssh-keygen is packaged in app resources."
-                    .to_string(),
-            ),
-        ),
-    });
-
-    probes.push(match locate_noland_net_helper_binary() {
-        Some(path) => ok_probe(
-            "binary.net_helper",
-            "Managed tunnel helper",
-            "wireguard",
-            "noland-net-helper was found.",
-            Some(path.display().to_string()),
-        ),
-        None => failed_probe(
-            "binary.net_helper",
-            "Managed tunnel helper",
-            "wireguard",
-            "noland-net-helper is missing or failed integrity validation.",
-            None,
-            Some("Reinstall or rebuild Noland Connect; the embedded tunnel requires the helper packaged with this exact app build.".to_string()),
-        ),
-    });
-
-    probes.push(
-        match crate::mic_client::runtime::resolve_mic_sender_binary() {
-            Ok(path) => ok_probe(
-                "binary.mic_sender",
-                "Microphone sidecar",
-                "audio",
-                "noland-mic-sender was found.",
+    #[cfg(not(target_os = "ios"))]
+    {
+        let managed_ssh =
+            os.locate_app_managed_binary("ssh", "NOLAND_SSH_BIN", cfg!(target_os = "windows"));
+        probes.push(match managed_ssh {
+            Some(path) => ok_probe(
+                "binary.ssh",
+                "Managed SSH client",
+                "bundled binaries",
+                "Bundled SSH client found.",
                 Some(path.display().to_string()),
             ),
-            Err(error) => warn_probe(
-                "binary.mic_sender",
-                "Microphone sidecar",
-                "audio",
-                "noland-mic-sender is missing or not executable.",
-                Some(error.to_string()),
-                Some("Microphone forwarding will be unavailable until the sidecar is packaged for this OS/arch.".to_string()),
+            None => failed_probe(
+                "binary.ssh",
+                "Managed SSH client",
+                "bundled binaries",
+                "Bundled SSH client is missing.",
+                None,
+                Some(
+                    "Reinstall or rebuild Noland Connect so ssh is packaged in app resources."
+                        .to_string(),
+                ),
             ),
-        },
-    );
+        });
+
+        let managed_scp =
+            os.locate_app_managed_binary("scp", "NOLAND_SCP_BIN", cfg!(target_os = "windows"));
+        probes.push(match managed_scp {
+            Some(path) => ok_probe(
+                "binary.scp",
+                "Managed SCP client",
+                "bundled binaries",
+                "Bundled SCP client found.",
+                Some(path.display().to_string()),
+            ),
+            None => failed_probe(
+                "binary.scp",
+                "Managed SCP client",
+                "bundled binaries",
+                "Bundled SCP client is missing.",
+                None,
+                Some(
+                    "Reinstall or rebuild Noland Connect so scp is packaged in app resources."
+                        .to_string(),
+                ),
+            ),
+        });
+
+        let managed_ssh_keygen = os.locate_app_managed_binary(
+            "ssh-keygen",
+            "NOLAND_SSH_KEYGEN_BIN",
+            cfg!(target_os = "windows"),
+        );
+        probes.push(match managed_ssh_keygen {
+            Some(path) => ok_probe(
+                "binary.ssh_keygen",
+                "Managed SSH key generator",
+                "bundled binaries",
+                "Bundled ssh-keygen found.",
+                Some(path.display().to_string()),
+            ),
+            None => failed_probe(
+                "binary.ssh_keygen",
+                "Managed SSH key generator",
+                "bundled binaries",
+                "Bundled ssh-keygen is missing.",
+                None,
+                Some(
+                    "Reinstall or rebuild Noland Connect so ssh-keygen is packaged in app resources."
+                        .to_string(),
+                ),
+            ),
+        });
+
+        probes.push(match locate_noland_net_helper_binary() {
+            Some(path) => ok_probe(
+                "binary.net_helper",
+                "Managed tunnel helper",
+                "wireguard",
+                "noland-net-helper was found.",
+                Some(path.display().to_string()),
+            ),
+            None => failed_probe(
+                "binary.net_helper",
+                "Managed tunnel helper",
+                "wireguard",
+                "noland-net-helper is missing or failed integrity validation.",
+                None,
+                Some("Reinstall or rebuild Noland Connect; the embedded tunnel requires the helper packaged with this exact app build.".to_string()),
+            ),
+        });
+
+        probes.push(
+            match crate::mic_client::runtime::resolve_mic_sender_binary() {
+                Ok(path) => ok_probe(
+                    "binary.mic_sender",
+                    "Microphone sidecar",
+                    "audio",
+                    "noland-mic-sender was found.",
+                    Some(path.display().to_string()),
+                ),
+                Err(error) => warn_probe(
+                    "binary.mic_sender",
+                    "Microphone sidecar",
+                    "audio",
+                    "noland-mic-sender is missing or not executable.",
+                    Some(error.to_string()),
+                    Some("Microphone forwarding will be unavailable until the sidecar is packaged for this OS/arch.".to_string()),
+                ),
+            },
+        );
+    }
+
+    #[cfg(target_os = "ios")]
+    {
+        probes.push(ok_probe(
+            "binary.ssh",
+            "Native SSH client",
+            "native services",
+            "The in-process Rust SSH client is linked; no bundled executable is required on iOS.",
+            Some("noland-ssh (russh transport)".to_string()),
+        ));
+        probes.push(ok_probe(
+            "binary.scp",
+            "Native SFTP upload client",
+            "native services",
+            "Recursive SFTP uploads are provided by the in-process SSH client; no SCP executable is required on iOS.",
+            Some("noland-ssh (russh-sftp transport)".to_string()),
+        ));
+
+        let key_probe = match app.path().app_data_dir() {
+            Ok(app_data_dir) => {
+                let key_name = if state.ssh.key_name.trim().is_empty() {
+                    "nolandConnectSSH"
+                } else {
+                    state.ssh.key_name.as_str()
+                };
+                let service = SshKeyService::new(key_name);
+                match service.ensure_keypair(&app_data_dir).await {
+                    Ok(paths) => match service.load_key_into_agent(&paths.private_key_path, "").await {
+                        Ok(()) => ok_probe(
+                            "binary.ssh_keygen",
+                            "Native SSH key generation",
+                            "native services",
+                            "The Ed25519 key was generated or loaded and verified through iOS Keychain.",
+                            Some(format!(
+                                "Private key reference: {}; public key: {}",
+                                paths.private_key_path.display(),
+                                paths.public_key_path.display()
+                            )),
+                        ),
+                        Err(error) => failed_probe(
+                            "binary.ssh_keygen",
+                            "Native SSH key generation",
+                            "native services",
+                            "The protected SSH key could not be read back from iOS Keychain.",
+                            Some(error.to_string()),
+                            Some("Unlock the device and retry. If the error persists, reinstall this development build and generate a new key.".to_string()),
+                        ),
+                    },
+                    Err(error) => failed_probe(
+                        "binary.ssh_keygen",
+                        "Native SSH key generation",
+                        "native services",
+                        "The app could not generate or persist its iOS SSH key.",
+                        Some(error.to_string()),
+                        Some("Unlock the device and retry. The iOS port uses Rust Ed25519 generation and Keychain rather than ssh-keygen.".to_string()),
+                    ),
+                }
+            }
+            Err(error) => failed_probe(
+                "binary.ssh_keygen",
+                "Native SSH key generation",
+                "native services",
+                "The app data directory required for the SSH key reference is unavailable.",
+                Some(error.to_string()),
+                None,
+            ),
+        };
+        probes.push(key_probe);
+
+        probes.push(if crate::services::ios_platform::packet_tunnel_available() {
+            ok_probe(
+                "binary.net_helper",
+                "iOS packet tunnel",
+                "wireguard",
+                "The signed WireGuard Network Extension is embedded in this app.",
+                Some("noland.main.app.PacketTunnel".to_string()),
+            )
+        } else {
+            failed_probe(
+                "binary.net_helper",
+                "iOS packet tunnel",
+                "wireguard",
+                "The WireGuard Network Extension is not embedded in this app build.",
+                None,
+                Some("Rebuild and reinstall the signed app with NolandPacketTunnel.appex embedded.".to_string()),
+            )
+        });
+
+        let permission = crate::services::ios_platform::microphone_permission();
+        probes.push(match permission {
+            MicrophonePermission::Denied => warn_probe(
+                "binary.mic_sender",
+                "Native microphone sender",
+                "audio",
+                "Native AVAudioSession capture and Opus/RTP are linked, but microphone permission is denied.",
+                Some("Permission: denied".to_string()),
+                Some("Enable Microphone access for Noland Connect in iOS Settings.".to_string()),
+            ),
+            MicrophonePermission::Granted => ok_probe(
+                "binary.mic_sender",
+                "Native microphone sender",
+                "audio",
+                "Native AVAudioSession capture and Opus/RTP forwarding are available.",
+                Some("Permission: granted; no sidecar executable is required".to_string()),
+            ),
+            MicrophonePermission::Undetermined => ok_probe(
+                "binary.mic_sender",
+                "Native microphone sender",
+                "audio",
+                "Native AVAudioSession capture and Opus/RTP forwarding are available.",
+                Some("Permission will be requested when microphone forwarding starts".to_string()),
+            ),
+        });
+    }
 
     if os.is_linux() {
         probes.push(ok_probe(
