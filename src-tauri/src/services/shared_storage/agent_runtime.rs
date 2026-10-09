@@ -1,8 +1,7 @@
 //! Deploy and start noland-state-agent on the remote disposable instance.
 
 use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -343,50 +342,8 @@ pub async fn call_agent_raw(
         "method": method,
         "params": params,
     });
-    let local_request = std::env::temp_dir().join(format!("noland-rpc-{request_id}.json"));
-    let mut options = OpenOptions::new();
-    options.write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    let mut request_file = options
-        .open(&local_request)
-        .map_err(|error| AppError::State(format!("create state-agent RPC request: {error}")))?;
-    let _local_request_guard = TempFileGuard(local_request.clone());
-    request_file
-        .write_all(format!("{request}\n").as_bytes())
-        .and_then(|_| request_file.sync_all())
-        .map_err(|error| AppError::State(format!("write state-agent RPC request: {error}")))?;
-    drop(request_file);
-    let remote_request = format!("/run/noland/noland-rpc-{request_id}.json");
-    let transfer_task = {
-        let remote = remote.clone();
-        let local_request = local_request.clone();
-        let remote_request = remote_request.clone();
-        tokio::task::spawn_blocking(move || {
-            remote.scp(&local_request, &remote_request, Duration::from_secs(60))
-        })
-    };
-    let transfer = match transfer_task.await {
-        Ok(Ok(transfer)) => transfer,
-        Ok(Err(error)) => {
-            cleanup_remote_request(remote, &remote_request).await;
-            return Err(error);
-        }
-        Err(error) => {
-            cleanup_remote_request(remote, &remote_request).await;
-            return Err(AppError::Command(format!("join failure: {error}")));
-        }
-    };
-    if transfer.status_code != 0 {
-        cleanup_remote_request(remote, &remote_request).await;
-        return Err(AppError::Provisioning(format!(
-            "failed to transfer state-agent RPC request: {}",
-            concise_remote_failure(&transfer.stdout, &transfer.stderr)
-        )));
-    }
+    let mut request_bytes = serde_json::to_vec(&request)?;
+    request_bytes.push(b'\n');
     let rpc_timeout_secs = match method {
         "StartSeal" => 2 * 60 * 60,
         "GetHealth" => 30,
@@ -394,28 +351,20 @@ pub async fn call_agent_raw(
     };
     let ssh_timeout = Duration::from_secs(rpc_timeout_secs + 60);
     let cmd = format!(
-        "python3 -c 'import glob,os,socket,sys,time; path=sys.argv[1]; now=time.time(); [(os.unlink(p) if p != path and now-os.path.getmtime(p) > 300 else None) for p in glob.glob(\"/run/noland/noland-rpc-*.json\")]; req=open(path,\"rb\").read(); os.unlink(path); s=socket.socket(socket.AF_UNIX); s.settimeout({timeout}); s.connect(\"{sock}\"); s.sendall(req); s.shutdown(1); sys.stdout.buffer.write(s.makefile(\"rb\").readline(4194305))' {request}",
+        "python3 -c 'import socket,sys; req=sys.stdin.buffer.read(4194305); s=socket.socket(socket.AF_UNIX); s.settimeout({timeout}); s.connect(\"{sock}\"); s.sendall(req); s.shutdown(1); sys.stdout.buffer.write(s.makefile(\"rb\").readline(4194305))'",
         timeout = rpc_timeout_secs,
         sock = AGENT_SOCKET,
-        request = shell_escape(&remote_request),
     );
     let output_task = {
         let remote = remote.clone();
-        tokio::task::spawn_blocking(move || remote.ssh(&cmd, ssh_timeout))
+        tokio::task::spawn_blocking(move || remote.ssh_with_stdin(&cmd, request_bytes, ssh_timeout))
     };
     let output = match output_task.await {
         Ok(Ok(output)) => output,
-        Ok(Err(error)) => {
-            cleanup_remote_request(remote, &remote_request).await;
-            return Err(error);
-        }
-        Err(error) => {
-            cleanup_remote_request(remote, &remote_request).await;
-            return Err(AppError::Command(format!("join failure: {error}")));
-        }
+        Ok(Err(error)) => return Err(error),
+        Err(error) => return Err(AppError::Command(format!("join failure: {error}"))),
     };
     if output.status_code != 0 {
-        cleanup_remote_request(remote, &remote_request).await;
         return Err(AppError::Provisioning(format!(
             "state-agent RPC {method} failed: {} {}",
             output.stdout.trim(),
@@ -436,8 +385,6 @@ pub async fn call_agent_raw(
     }
     Ok(value.get("result").cloned().unwrap_or(value))
 }
-
-struct TempFileGuard(PathBuf);
 
 #[cfg(test)]
 mod tests {
@@ -515,19 +462,6 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         let _ = fs::remove_file(&archive_path);
     }
-}
-
-impl Drop for TempFileGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
-async fn cleanup_remote_request(remote: &RemoteExec, remote_request: &str) {
-    let command = format!("rm -f -- {}", shell_escape(remote_request));
-    let remote = remote.clone();
-    let _ =
-        tokio::task::spawn_blocking(move || remote.ssh(&command, Duration::from_secs(15))).await;
 }
 
 fn concise_remote_failure(stdout: &str, stderr: &str) -> String {

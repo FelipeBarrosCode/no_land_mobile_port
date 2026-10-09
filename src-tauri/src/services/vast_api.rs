@@ -216,20 +216,14 @@ impl VastApiClient {
             .map_err(|error| map_send_error("PUT", &url, error))?;
 
         let body = parse_response(response, "PUT", &url, started).await?;
-        info!(
-            "Vast create_instance raw response offer_id={} body={}",
-            offer_id,
-            abbreviate_text(&body.to_string())
-        );
         let contract_id = body
             .get("new_contract")
             .or_else(|| body.get("instance_id"))
             .and_then(Value::as_u64)
             .ok_or_else(|| {
-                AppError::Api(format!(
-                    "Vast create instance response did not include contract id: {}",
-                    abbreviate_text(&body.to_string())
-                ))
+                AppError::Api(
+                    "Vast create instance response did not include a contract id".to_string(),
+                )
             })?;
 
         info!(

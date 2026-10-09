@@ -82,6 +82,7 @@ pub fn init_logging() {
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
+        redact_legacy_sensitive_lines(&path);
         let file = OpenOptions::new()
             .create(true)
             .append(true)
@@ -98,4 +99,26 @@ pub fn init_logging() {
         .with_thread_ids(false)
         .compact()
         .try_init();
+}
+
+fn redact_legacy_sensitive_lines(path: &PathBuf) {
+    let Ok(content) = fs::read_to_string(path) else {
+        return;
+    };
+    let mut changed = false;
+    let sanitized = content
+        .lines()
+        .map(|line| {
+            if let Some((prefix, _)) = line.split_once("Vast create_instance raw response") {
+                changed = true;
+                format!("{prefix}Vast create_instance raw response [redacted]")
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    if changed {
+        let _ = fs::write(path, format!("{sanitized}\n"));
+    }
 }

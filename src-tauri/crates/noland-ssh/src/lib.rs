@@ -17,6 +17,7 @@ use russh_sftp::{
 };
 use serde::Serialize;
 use tokio::io::AsyncWriteExt;
+use tracing::{info, warn};
 use zeroize::Zeroizing;
 
 pub use russh::keys;
@@ -263,6 +264,11 @@ impl Connection {
                         })
                     }
                     Err(Error::ChannelRejected("SFTP subsystem")) => {
+                        warn!(
+                            host = %self.host,
+                            port = self.port,
+                            "SSH server rejected SFTP; retrying upload with streaming SCP"
+                        );
                         upload_with_scp(&session, source, destination, recursive, started, self)
                             .await
                     }
@@ -385,13 +391,22 @@ async fn upload_with_scp(
             "Remote upload destination is not safe for the SCP protocol".into(),
         ));
     }
-    let mut channel = session.channel_open_session().await?;
+    let channel = session.channel_open_session().await?;
     let recursive_flag = if recursive { " -r" } else { "" };
     let command = format!("scp -t{recursive_flag} {}", shell_quote(destination));
-    channel.exec(true, command).await?;
-    expect_success(&mut channel, "SCP upload command").await?;
+    // The first SCP protocol acknowledgement is sufficient proof that the
+    // remote command started. Avoid requesting a separate SSH acknowledgement:
+    // some servers can emit SCP's initial NUL before the channel-success packet,
+    // which would otherwise be consumed while waiting for channel success.
+    channel.exec(false, command).await?;
     let mut sink = ScpSink::new(channel);
     sink.read_ack().await?;
+    info!(
+        host = %connection.host,
+        port = connection.port,
+        recursive,
+        "Remote SCP sink accepted the upload"
+    );
 
     let mut pending = vec![ScpWork::Path {
         local: source.to_path_buf(),
@@ -483,6 +498,13 @@ async fn upload_with_scp(
         }
     }
     let status_code = sink.exit_status.unwrap_or(0);
+    info!(
+        host = %connection.host,
+        port = connection.port,
+        status_code,
+        duration_ms = started.elapsed().as_millis(),
+        "Streaming SCP upload finished"
+    );
     Ok(ExecOutput {
         command: format!(
             "scp-protocol {}@{}:{} <upload>",

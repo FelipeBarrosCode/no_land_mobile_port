@@ -900,6 +900,18 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     }
     ensure_not_cancelled(&context)?;
 
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConnectingSsh,
+        "Installing remote management agents",
+        Some(
+            "SSH is connected; uploading and validating the state, lifecycle, and network agents"
+                .to_string(),
+        ),
+        false,
+    )
+    .await;
     info!(
         "Ensuring state-agent is installed and enabled on instance {}",
         instance.id
@@ -1897,6 +1909,18 @@ async fn run_existing_instance_orchestration(
     }
     ensure_not_cancelled(&context)?;
 
+    emit_transition(
+        &app,
+        &context,
+        OrchestrationState::ConnectingSsh,
+        "Installing remote management agents",
+        Some(
+            "SSH is connected; uploading and validating the state, lifecycle, and network agents"
+                .to_string(),
+        ),
+        false,
+    )
+    .await;
     info!(
         "Ensuring state-agent is installed and enabled on existing instance {}",
         instance.id
