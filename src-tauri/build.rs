@@ -203,6 +203,9 @@ fn main() {
     );
     for source in [
         "noland-moonlight/src/noland_video_renderer_ios.m",
+        "noland-moonlight/src/noland_stream_controls_ios.m",
+        "noland-moonlight/src/noland_stream_controls_ios.h",
+        "noland-moonlight/src/noland_keyboard_ios.h",
         "noland-moonlight/src/noland_audio_renderer_ios.m",
         "noland-moonlight/src/noland_microphone_ios.m",
         "noland-moonlight/src/noland_input_ios.c",

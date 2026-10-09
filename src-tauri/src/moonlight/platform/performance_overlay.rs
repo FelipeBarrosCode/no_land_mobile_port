@@ -40,6 +40,55 @@ pub fn set_preference(configuration: &mut MoonlightConfiguration, host_id: &str,
     }
 }
 
+#[cfg(target_os = "ios")]
+fn text(stats: &RuntimeStatistics, probe: Option<&serde_json::Value>) -> String {
+    let p = &stats.performance;
+    let drops = stats.adaptive_stale_drop_count
+        + stats.pacer_backlog_drop_count
+        + stats.renderer_error_drop_count
+        + stats.smoothing_overflow_drops;
+    let mut result = format!(
+        "{}×{} {} · {}fps\nFPS in/dec/sub {:.0}/{}/{:.0}\n{:.1}Mb/s RTT {} ±{}ms\nHost {} Reasm {} Dec {}ms\nRenderQ {}ms Gaps {:.1}% Drop {}\nFEC +{}/-{} Q {}/{}/{}\n{} · {}B",
+        p.width, p.height, p.codec, stats.stream_fps,
+        p.incoming_fps, number(p.decoded_fps), p.submitted_fps,
+        p.video_mbps, number(stats.estimated_rtt_ms.map(f64::from)),
+        number(stats.estimated_rtt_variance_ms.map(f64::from)),
+        number(p.host_processing_ms), number(p.reassembly_ms), number(p.decode_ms),
+        number(p.render_queue_ms), p.missing_frames_percent, drops,
+        stats.fec_recoveries_interval, stats.fec_failures_interval,
+        stats.pending_core_video_frames, stats.decoder_queue_depth, stats.render_queue_depth,
+        stats.effective_pacing_mode, stats.requested_packet_size,
+    );
+    if let Some(probe) = probe {
+        let current = &probe["metrics"]["current"];
+        let window = &probe["metrics"]["last60Seconds"];
+        result.push_str(&format!(
+            "\nProbe RTT {} Jit {}ms\nLoss {}% P95 {}ms (60s)",
+            number(
+                current["rttMs"]
+                    .as_f64()
+                    .filter(|_| current["lost"].as_bool() == Some(false))
+            ),
+            number(
+                current["jitterMs"]
+                    .as_f64()
+                    .filter(|_| window["received"].as_u64().unwrap_or(0) >= 2)
+            ),
+            number(window["lossPercent"].as_f64()),
+            number(window["p95RttMs"].as_f64()),
+        ));
+    } else {
+        result.push_str("\nProbe: warming up / unavailable");
+    }
+    result.push_str(if p.samples == 0 {
+        "\nWaiting for video…"
+    } else {
+        "\n1s video · sub ≠ scanout"
+    });
+    result
+}
+
+#[cfg(not(target_os = "ios"))]
 fn text(stats: &RuntimeStatistics, probe: Option<&serde_json::Value>) -> String {
     let p = &stats.performance;
     let mut result = format!(

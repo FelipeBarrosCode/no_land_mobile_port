@@ -2,6 +2,12 @@
 
 ## Current checkpoint
 
+The user reported successful end-to-end provisioning/streaming on the iPhone 13
+after `96b765c`. This is a user-reported acceptance of that flow, not completion
+of the broader network lifecycle/TURN matrix. Current input work adds the native
+stream drawer, selectable touch modes, on-screen controller and keyboard fixes;
+see [stream controls](ios-streaming-reference.md#native-stream-controls-2026-10-09).
+
 See [the network pipeline audit](ios-network-audit.md) for device evidence,
 connected-path corrections and outstanding parity gaps. Initial iOS VPN
 activation/handshake has passed on-device; full MTU, Direct/TURN and lifecycle

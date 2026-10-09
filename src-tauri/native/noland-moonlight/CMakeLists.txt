@@ -26,6 +26,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
   target_compile_definitions(noland_moonlight PRIVATE NOLAND_IOS_RENDERER)
   target_sources(noland_moonlight PRIVATE
     src/noland_video_renderer_ios.m
+    src/noland_stream_controls_ios.m
     src/noland_audio_renderer_ios.m
     src/noland_microphone_ios.m
     src/noland_input_ios.c
@@ -132,6 +133,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "iOS")
   )
   set_source_files_properties(
     src/noland_video_renderer_ios.m
+    src/noland_stream_controls_ios.m
     src/noland_audio_renderer_ios.m
     src/noland_microphone_ios.m
     PROPERTIES COMPILE_FLAGS "-fobjc-arc"

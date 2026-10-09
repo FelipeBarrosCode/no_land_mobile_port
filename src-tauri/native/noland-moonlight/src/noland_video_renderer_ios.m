@@ -10,6 +10,8 @@
 #import <dispatch/dispatch.h>
 
 #include "noland_video_renderer.h"
+#import "noland_stream_controls_ios.h"
+#include "noland_keyboard_ios.h"
 #include "Limelight.h"
 
 #include <stdlib.h>
@@ -24,7 +26,6 @@
 @end
 
 extern bool nl_ios_input_capture_active(void);
-extern int nl_ios_input_capture_mode(void);
 extern void noland_ios_stream_dismiss(void);
 
 @interface NolandStreamView : UIView <UIKeyInput> {
@@ -35,9 +36,18 @@ extern void noland_ios_stream_dismiss(void);
   BOOL _absoluteRightClick;
   NSUInteger _peakTouchCount;
   NSTimer* _dragTimer;
+  NSTimer* _clickTimer;
+  uint8_t _pendingClickButton;
+  BOOL _suppressTouchSequence;
+  BOOL _keyboardVisible;
+  NSMutableSet<NSNumber*>* _hardwareKeys;
+  NSMutableSet<UITouch*>* _surfaceTouches;
 }
 @property (nonatomic, assign) nl_video_renderer_t* renderer;
+@property (nonatomic, strong) NolandStreamControls* controls;
+@property (nonatomic, strong) NSMutableArray<id>* inputObservers;
 - (void)prepareForRemoval;
+- (void)cancelPointerInput;
 @end
 
 @interface NolandControllerInput : NSObject
@@ -49,9 +59,13 @@ extern void noland_ios_stream_dismiss(void);
 @property (nonatomic, assign) float accumulatedMouseY;
 @property (nonatomic, strong) NSMutableDictionary<NSNumber*, NSArray*>* hapticMotors;
 @property (nonatomic, strong) NSMutableDictionary<NSString*, NSTimer*>* motionTimers;
+@property (atomic, assign) BOOL inputSuspended;
+@property (nonatomic, assign) NSUInteger virtualNumber;
+@property (nonatomic, assign) BOOL virtualAnnounced;
 - (void)start;
 - (void)stop;
 - (void)announceControllers;
+- (void)sendVirtualGamepad:(NolandVirtualGamepadState)state enabled:(BOOL)enabled;
 @end
 
 @interface NolandHapticMotor : NSObject
@@ -224,44 +238,76 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
   self = [super initWithFrame:frame];
   if (self != nil) {
     self.multipleTouchEnabled = YES;
-    UIButton* close = [UIButton buttonWithType:UIButtonTypeSystem];
-    close.frame = CGRectMake(16, 44, 48, 48);
-    close.autoresizingMask = UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleBottomMargin;
-    close.backgroundColor = [UIColor colorWithWhite:0 alpha:0.65];
-    close.tintColor = UIColor.whiteColor;
-    close.layer.cornerRadius = 24;
-    [close setTitle:@"×" forState:UIControlStateNormal];
-    close.accessibilityLabel = @"Show stream controls";
-    close.tag = 1001;
-    close.titleLabel.font = [UIFont systemFontOfSize:30 weight:UIFontWeightMedium];
-    [close addTarget:self action:@selector(closeStream) forControlEvents:UIControlEventTouchUpInside];
-    [self addSubview:close];
-
-    UIButton* keyboard = [UIButton buttonWithType:UIButtonTypeSystem];
-    keyboard.frame = CGRectMake(76, 44, 52, 48);
-    keyboard.autoresizingMask = UIViewAutoresizingFlexibleRightMargin | UIViewAutoresizingFlexibleBottomMargin;
-    keyboard.backgroundColor = [UIColor colorWithWhite:0 alpha:0.65];
-    keyboard.tintColor = UIColor.whiteColor;
-    keyboard.layer.cornerRadius = 24;
-    [keyboard setTitle:@"⌨" forState:UIControlStateNormal];
-    keyboard.accessibilityLabel = @"Show remote keyboard";
-    keyboard.tag = 1002;
-    keyboard.titleLabel.font = [UIFont systemFontOfSize:22];
-    [keyboard addTarget:self action:@selector(showKeyboard) forControlEvents:UIControlEventTouchUpInside];
-    [self addSubview:keyboard];
+    _hardwareKeys = [NSMutableSet set];
+    _surfaceTouches = [NSMutableSet set];
+    self.inputObservers = [NSMutableArray array];
 
     UILabel* statistics = [[UILabel alloc] initWithFrame:CGRectZero];
     statistics.tag = 1003;
     statistics.numberOfLines = 0;
-    statistics.font = [UIFont monospacedSystemFontOfSize:11 weight:UIFontWeightRegular];
+    statistics.font = [UIFont monospacedSystemFontOfSize:9 weight:UIFontWeightMedium];
     statistics.textColor = UIColor.whiteColor;
-    statistics.backgroundColor = [UIColor colorWithWhite:0 alpha:0.68];
-    statistics.layer.cornerRadius = 8;
+    statistics.backgroundColor = [UIColor colorWithWhite:0 alpha:0.45];
+    statistics.layer.cornerRadius = 4;
     statistics.layer.masksToBounds = YES;
     statistics.hidden = YES;
     statistics.isAccessibilityElement = YES;
     statistics.accessibilityLabel = @"Stream statistics";
     [self addSubview:statistics];
+
+    self.controls = [[NolandStreamControls alloc] initWithFrame:self.bounds];
+    [self addSubview:self.controls];
+    [self.controls installGesturesOnView:self];
+    __weak NolandStreamView* weakSelf = self;
+    self.controls.menuChanged = ^(BOOL visible) {
+      NolandStreamView* view = weakSelf;
+      if (!view) return;
+      [view cancelPointerInput];
+      g_controller_input.inputSuspended = visible;
+      if (visible) {
+        [view resignFirstResponder];
+        nl_runtime_t* runtime = nl_ios_runtime(view.renderer);
+        if (runtime) nl_release_all_input(runtime);
+        [view->_hardwareKeys removeAllObjects];
+      } else [view.controls refreshGamepad];
+    };
+    self.controls.modeChanged = ^{ [weakSelf cancelPointerInput]; };
+    self.controls.keyboardRequested = ^{ [weakSelf showKeyboard]; };
+    self.controls.dashboardRequested = ^{ [weakSelf closeStream]; };
+    self.controls.gamepadChanged = ^(BOOL enabled, NolandVirtualGamepadState state) {
+      [g_controller_input sendVirtualGamepad:state enabled:enabled];
+    };
+    id show = [NSNotificationCenter.defaultCenter addObserverForName:UIKeyboardWillShowNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
+      NolandStreamView* view = weakSelf;
+      if (!view || !view.isFirstResponder) return;
+      view->_keyboardVisible = YES;
+      [view cancelPointerInput];
+      [view.controls releaseControls];
+      view.controls.hidden = YES;
+    }];
+    id hide = [NSNotificationCenter.defaultCenter addObserverForName:UIKeyboardWillHideNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
+      NolandStreamView* view = weakSelf;
+      if (!view) return;
+      view->_keyboardVisible = NO;
+      view.controls.hidden = NO;
+      [view cancelPointerInput];
+    }];
+    id inactive = [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationWillResignActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
+      NolandStreamView* view = weakSelf;
+      if (!view) return;
+      [view cancelPointerInput];
+      [view.controls releaseControls];
+      nl_runtime_t* runtime = nl_ios_runtime(view.renderer);
+      if (runtime) nl_release_all_input(runtime);
+      [view->_hardwareKeys removeAllObjects];
+      g_controller_input.inputSuspended = YES;
+    }];
+    id active = [NSNotificationCenter.defaultCenter addObserverForName:UIApplicationDidBecomeActiveNotification object:nil queue:NSOperationQueue.mainQueue usingBlock:^(NSNotification* note) {
+      NolandStreamView* view = weakSelf;
+      g_controller_input.inputSuspended = view.controls.menuVisible || !view.window;
+      [view.controls refreshGamepad];
+    }];
+    [self.inputObservers addObjectsFromArray:@[show, hide, inactive, active]];
 
     if (@available(iOS 13.4, *)) {
       UIPanGestureRecognizer* discrete = [[UIPanGestureRecognizer alloc] initWithTarget:self action:@selector(mouseWheelDiscrete:)];
@@ -283,22 +329,37 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
   for (CALayer* layer in self.layer.sublayers) {
     if ([layer isKindOfClass:[AVSampleBufferDisplayLayer class]]) layer.frame = self.bounds;
   }
-  CGFloat top = self.safeAreaInsets.top + 8.0;
-  [self viewWithTag:1001].frame = CGRectMake(self.safeAreaInsets.left + 12.0, top, 48.0, 48.0);
-  [self viewWithTag:1002].frame = CGRectMake(self.safeAreaInsets.left + 72.0, top, 52.0, 48.0);
-  UIView* statistics = [self viewWithTag:1003];
-  statistics.frame = CGRectMake(self.safeAreaInsets.left + 12.0,
-                                CGRectGetMaxY(self.bounds) - self.safeAreaInsets.bottom - 178.0,
-                                MIN(420.0, self.bounds.size.width - self.safeAreaInsets.left - self.safeAreaInsets.right - 24.0),
-                                166.0);
+  self.controls.frame = self.bounds;
+  UILabel* statistics = (UILabel*)[self viewWithTag:1003];
+  CGFloat maxWidth = MIN(245.0, self.bounds.size.width * 0.4);
+  CGSize textSize = [statistics sizeThatFits:CGSizeMake(maxWidth, CGFLOAT_MAX)];
+  CGFloat width = ceil(MIN(maxWidth, textSize.width));
+  statistics.frame = CGRectMake(CGRectGetMaxX(self.bounds) - self.safeAreaInsets.right - width - 6.0,
+                                self.safeAreaInsets.top + 6.0, width, ceil(textSize.height));
 }
 - (void)closeStream {
+  [self cancelPointerInput];
+  [self.controls releaseControls];
+  [self resignFirstResponder];
+  g_controller_input.inputSuspended = YES;
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   if (runtime != NULL) nl_release_all_input(runtime);
   noland_ios_stream_dismiss();
 }
 - (void)showKeyboard { [self becomeFirstResponder]; }
+- (UIView*)inputAccessoryView {
+  UIToolbar* toolbar = [[UIToolbar alloc] initWithFrame:CGRectMake(0, 0, self.bounds.size.width, 44)];
+  toolbar.items = @[[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace target:nil action:nil],
+    [[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemDone target:self action:@selector(hideKeyboard)]];
+  return toolbar;
+}
+- (void)hideKeyboard { [self resignFirstResponder]; }
+- (UITextAutocorrectionType)autocorrectionType { return UITextAutocorrectionTypeNo; }
+- (UITextAutocapitalizationType)autocapitalizationType { return UITextAutocapitalizationTypeNone; }
+- (UITextSpellCheckingType)spellCheckingType { return UITextSpellCheckingTypeNo; }
+- (UIEditingInteractionConfiguration)editingInteractionConfiguration { return UIEditingInteractionConfigurationNone; }
 - (void)mouseWheelDiscrete:(UIPanGestureRecognizer*)gesture API_AVAILABLE(ios(13.4)) {
+  if (self.controls.menuVisible || _keyboardVisible) return;
   if (gesture.state != UIGestureRecognizerStateChanged) return;
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   CGPoint translation = [gesture translationInView:self];
@@ -309,6 +370,7 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
   }
 }
 - (void)mouseWheelContinuous:(UIPanGestureRecognizer*)gesture API_AVAILABLE(ios(13.4)) {
+  if (self.controls.menuVisible || _keyboardVisible) return;
   if (gesture.state != UIGestureRecognizerStateChanged) return;
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   CGPoint translation = [gesture translationInView:self];
@@ -323,8 +385,26 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
 - (void)insertText:(NSString*)text {
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   if (runtime != NULL && text.length > 0) {
-    const char* utf8 = text.UTF8String;
-    nl_send_utf8_text(runtime, utf8, (uint32_t)strlen(utf8));
+    // Match Moonlight's keyboard strategy: normal keys for ASCII, UTF-8 only
+    // when needed. Linux hosts may implement UTF-8 via Ctrl+Shift+U composition,
+    // which is unsuitable for ordinary key presses in games/terminal apps.
+    NSData* ascii = [text dataUsingEncoding:NSASCIIStringEncoding allowLossyConversion:NO];
+    if (ascii) {
+      const uint8_t* chars = ascii.bytes;
+      for (NSUInteger i = 0; i < ascii.length; i++) {
+        bool shift;
+        uint16_t key = nl_ios_ascii_key(chars[i], &shift);
+        if (!key) continue;
+        BOOL pressShift = shift && ![_hardwareKeys containsObject:@(0xA0)] && ![_hardwareKeys containsObject:@(0xA1)];
+        if (pressShift) nl_send_keyboard(runtime, 0xA0, true, MODIFIER_SHIFT);
+        nl_send_keyboard(runtime, key, true, shift ? MODIFIER_SHIFT : 0);
+        nl_send_keyboard(runtime, key, false, shift ? MODIFIER_SHIFT : 0);
+        if (pressShift) nl_send_keyboard(runtime, 0xA0, false, 0);
+      }
+    } else {
+      const char* utf8 = text.UTF8String;
+      nl_send_utf8_text(runtime, utf8, (uint32_t)strlen(utf8));
+    }
   }
 }
 - (void)deleteBackward {
@@ -354,15 +434,18 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
 }
 - (void)beginDragTimer {
   [_dragTimer invalidate];
+  __weak NolandStreamView* weakSelf = self;
   _dragTimer = [NSTimer scheduledTimerWithTimeInterval:0.650 repeats:NO block:^(NSTimer* timer) {
     (void)timer;
-    nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
-    if (runtime == NULL || self->_touchMoved) return;
-    if (nl_ios_input_capture_mode() == 1) {
-      self->_dragging = YES;
+    NolandStreamView* view = weakSelf;
+    if (!view || view->_touchMoved || view->_suppressTouchSequence || view->_surfaceTouches.count != 1 || view.controls.menuVisible || view->_keyboardVisible) return;
+    nl_runtime_t* runtime = nl_ios_runtime(view.renderer);
+    if (runtime == NULL) return;
+    if (view.controls.touchMode != NolandTouchModeDirect) {
+      view->_dragging = YES;
       nl_send_mouse_button(runtime, BUTTON_LEFT, true);
     } else {
-      self->_absoluteRightClick = YES;
+      view->_absoluteRightClick = YES;
       nl_send_mouse_button(runtime, BUTTON_LEFT, false);
       nl_send_mouse_button(runtime, BUTTON_RIGHT, true);
     }
@@ -372,18 +455,32 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
   return hypot(point.x - _originalLocation.x, point.y - _originalLocation.y) >= 5.0;
 }
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-  if (!nl_ios_input_capture_active()) return;
-  NSArray<UITouch*>* all = event.allTouches.allObjects;
+  if (!nl_ios_input_capture_active() || self.controls.menuVisible || _keyboardVisible) return;
+  if (_surfaceTouches.count == 0) {
+    [self finishPendingClick];
+    _touchMoved = NO; _suppressTouchSequence = NO; _peakTouchCount = 0;
+  }
+  for (UITouch* touch in touches) {
+    // Exclude gamepad, drawer, keyboard, and hardware mouse touches.
+    if (touch.view == self && touch.type != UITouchTypeIndirectPointer) [_surfaceTouches addObject:touch];
+  }
+  NSArray<UITouch*>* all = _surfaceTouches.allObjects;
   _peakTouchCount = MAX(_peakTouchCount, all.count);
-  _touchMoved = NO;
+  if (all.count >= 3) { [self cancelPointerInput]; return; }
   if (all.count == 1) {
     _originalLocation = _touchLocation = [all[0] locationInView:self];
-    if (nl_ios_input_capture_mode() == 2) {
+    if (self.controls.touchMode != NolandTouchModeTrackpad) {
       [self sendAbsolutePosition:_touchLocation];
+    }
+    if (self.controls.touchMode == NolandTouchModeDirect) {
       nl_send_mouse_button(nl_ios_runtime(self.renderer), BUTTON_LEFT, true);
     }
     [self beginDragTimer];
   } else if (all.count == 2) {
+    [_dragTimer invalidate]; _dragTimer = nil;
+    nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
+    if (runtime) { nl_send_mouse_button(runtime, BUTTON_LEFT, false); nl_send_mouse_button(runtime, BUTTON_RIGHT, false); }
+    _dragging = NO; _absoluteRightClick = NO;
     CGPoint first = [all[0] locationInView:self];
     CGPoint second = [all[1] locationInView:self];
     _originalLocation = _touchLocation = CGPointMake((first.x + second.x) / 2, (first.y + second.y) / 2);
@@ -391,11 +488,12 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
   (void)touches;
 }
 - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-  if (!nl_ios_input_capture_active()) return;
-  NSArray<UITouch*>* all = event.allTouches.allObjects;
+  if (!nl_ios_input_capture_active() || self.controls.menuVisible || _keyboardVisible || _suppressTouchSequence) return;
+  NSArray<UITouch*>* all = _surfaceTouches.allObjects;
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   if (runtime == NULL) return;
-  if (nl_ios_input_capture_mode() == 2 && all.count == 1) {
+  if (_peakTouchCount > 1 && all.count < 2) return;
+  if (self.controls.touchMode != NolandTouchModeTrackpad && all.count == 1) {
     CGPoint point = [all[0] locationInView:self];
     [self sendAbsolutePosition:point];
     if ([self confirmedMove:point]) { _touchMoved = YES; [_dragTimer invalidate]; }
@@ -411,62 +509,107 @@ static uint16_t nl_ios_virtual_key(UIKeyboardHIDUsage usage) {
     CGPoint second = [all[1] locationInView:self];
     CGPoint average = CGPointMake((first.x + second.x) / 2, (first.y + second.y) / 2);
     nl_send_vertical_scroll(runtime, (int16_t)lrint((average.y - _touchLocation.y) * 10.0), true);
-    if ([self confirmedMove:first]) _touchMoved = YES;
+    if ([self confirmedMove:average]) _touchMoved = YES;
     _touchLocation = average;
   }
   (void)touches;
 }
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
   [_dragTimer invalidate]; _dragTimer = nil;
+  BOOL hadTouches = _surfaceTouches.count > 0;
+  for (UITouch* touch in touches) [_surfaceTouches removeObject:touch];
+  if (!hadTouches) return;
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
-  if (runtime == NULL) return;
-  if (nl_ios_input_capture_mode() == 2) {
+  if (runtime == NULL || _suppressTouchSequence || self.controls.menuVisible || _keyboardVisible || !nl_ios_input_capture_active()) {
+    [self cancelPointerInput]; return;
+  }
+  if (self.controls.touchMode == NolandTouchModeDirect) {
     nl_send_mouse_button(runtime, BUTTON_LEFT, false);
     if (_absoluteRightClick) nl_send_mouse_button(runtime, BUTTON_RIGHT, false);
   } else if (_dragging) {
     nl_send_mouse_button(runtime, BUTTON_LEFT, false);
-  } else if (!_touchMoved && event.allTouches.count == touches.count) {
+    _touchMoved = YES;
+  } else if (!_touchMoved && _surfaceTouches.count == 0 && _peakTouchCount < 3) {
+    if (self.controls.touchMode == NolandTouchModeClickToUse && _peakTouchCount == 1)
+      [self sendAbsolutePosition:[[touches anyObject] locationInView:self]];
     uint8_t button = _peakTouchCount >= 2 ? BUTTON_RIGHT : BUTTON_LEFT;
     nl_send_mouse_button(runtime, button, true);
-    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
-      LiSendMouseButtonEvent(BUTTON_ACTION_RELEASE, button);
-    });
+    _pendingClickButton = button;
+    __weak NolandStreamView* weakSelf = self;
+    _clickTimer = [NSTimer scheduledTimerWithTimeInterval:0.05 repeats:NO block:^(NSTimer* timer) { [weakSelf finishPendingClick]; }];
   }
   _dragging = NO; _absoluteRightClick = NO;
-  if (event.allTouches.count == touches.count) _peakTouchCount = 0;
+  if (_surfaceTouches.count == 0) _peakTouchCount = 0;
 }
 - (void)touchesCancelled:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
-  [self touchesEnded:touches withEvent:event];
+  // Cancellation (menu gesture/background/keyboard) is never a click.
+  [self cancelPointerInput];
+}
+- (void)finishPendingClick {
+  [_clickTimer invalidate]; _clickTimer = nil;
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
-  if (runtime != NULL) nl_release_all_input(runtime);
+  if (runtime && _pendingClickButton) nl_send_mouse_button(runtime, _pendingClickButton, false);
+  _pendingClickButton = 0;
+}
+- (void)cancelPointerInput {
+  [_dragTimer invalidate]; _dragTimer = nil;
+  [self finishPendingClick];
+  nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
+  if (runtime) { nl_send_mouse_button(runtime, BUTTON_LEFT, false); nl_send_mouse_button(runtime, BUTTON_RIGHT, false); }
+  [_surfaceTouches removeAllObjects];
+  _dragging = NO; _absoluteRightClick = NO; _touchMoved = YES; _suppressTouchSequence = YES; _peakTouchCount = 0;
 }
 - (void)pressesBegan:(NSSet<UIPress*>*)presses withEvent:(UIPressesEvent*)event {
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
+  NSMutableSet* unhandled = [presses mutableCopy];
   for (UIPress* press in presses) {
-    if (press.key == nil || runtime == NULL) continue;
+    if (press.key == nil || runtime == NULL || self.controls.menuVisible) continue;
     uint16_t key = nl_ios_virtual_key(press.key.keyCode);
-    if (key != 0) nl_send_keyboard(runtime, key, true, nl_ios_modifiers(press.key.modifierFlags));
+    if (key != 0) {
+      if (![_hardwareKeys containsObject:@(key)]) nl_send_keyboard(runtime, key, true, nl_ios_modifiers(press.key.modifierFlags));
+      [_hardwareKeys addObject:@(key)];
+      [unhandled removeObject:press];
+    }
   }
-  [super pressesBegan:presses withEvent:event];
+  if (unhandled.count) [super pressesBegan:unhandled withEvent:event];
 }
 - (void)pressesEnded:(NSSet<UIPress*>*)presses withEvent:(UIPressesEvent*)event {
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
+  NSMutableSet* unhandled = [presses mutableCopy];
   for (UIPress* press in presses) {
     if (press.key == nil || runtime == NULL) continue;
     uint16_t key = nl_ios_virtual_key(press.key.keyCode);
-    if (key != 0) nl_send_keyboard(runtime, key, false, nl_ios_modifiers(press.key.modifierFlags));
+    if (key != 0) {
+      nl_send_keyboard(runtime, key, false, nl_ios_modifiers(press.key.modifierFlags));
+      [_hardwareKeys removeObject:@(key)];
+      [unhandled removeObject:press];
+    }
   }
-  [super pressesEnded:presses withEvent:event];
+  if (unhandled.count) [super pressesEnded:unhandled withEvent:event];
 }
 - (void)pressesCancelled:(NSSet<UIPress*>*)presses withEvent:(UIPressesEvent*)event {
   [self pressesEnded:presses withEvent:event];
 }
 - (void)prepareForRemoval {
-  [_dragTimer invalidate]; _dragTimer = nil;
+  [self cancelPointerInput];
+  [self.controls releaseControls];
   [self resignFirstResponder];
   nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
   if (runtime != NULL) nl_release_all_input(runtime);
   self.renderer = NULL;
+}
+- (void)didMoveToWindow {
+  [super didMoveToWindow];
+  if (!self.window) {
+    [self cancelPointerInput]; [self.controls releaseControls];
+    [_hardwareKeys removeAllObjects];
+  }
+  g_controller_input.inputSuspended = !self.window || self.controls.menuVisible;
+  if (self.window) [self.controls refreshGamepad];
+}
+- (void)dealloc {
+  [_dragTimer invalidate]; [_clickTimer invalidate];
+  for (id observer in self.inputObservers) [NSNotificationCenter.defaultCenter removeObserver:observer];
 }
 @end
 
@@ -477,6 +620,7 @@ static int16_t nl_ios_axis(float value) {
 @implementation NolandControllerInput
 - (NSUInteger)nextControllerNumber {
   bool occupied[16] = { false };
+  if (self.virtualNumber < 16) occupied[self.virtualNumber] = true;
   for (NSNumber* value in self.controllerNumbers.objectEnumerator) {
     if (value.unsignedIntegerValue < 16) occupied[value.unsignedIntegerValue] = true;
   }
@@ -484,7 +628,7 @@ static int16_t nl_ios_axis(float value) {
   return NSNotFound;
 }
 - (uint16_t)activeMask {
-  uint16_t mask = 0;
+  uint16_t mask = self.virtualNumber < 16 ? (uint16_t)(1u << self.virtualNumber) : 0;
   for (NSNumber* value in self.controllerNumbers.objectEnumerator) {
     NSUInteger number = value.unsignedIntegerValue;
     if (number < 16) mask |= (uint16_t)(1u << number);
@@ -512,7 +656,7 @@ static int16_t nl_ios_axis(float value) {
     (void)element;
     NolandControllerInput* strongSelf = weakSelf;
     nl_runtime_t* runtime = nl_ios_runtime(strongSelf.renderer);
-    if (runtime == NULL) return;
+    if (runtime == NULL || strongSelf.inputSuspended) return;
     uint32_t buttons = 0;
     if (gamepad.buttonA.isPressed) buttons |= A_FLAG;
     if (gamepad.buttonB.isPressed) buttons |= B_FLAG;
@@ -583,7 +727,7 @@ static int16_t nl_ios_axis(float value) {
     (void)input;
     NolandControllerInput* strongSelf = weakSelf;
     nl_runtime_t* runtime = nl_ios_runtime(strongSelf.renderer);
-    if (runtime == NULL) return;
+    if (runtime == NULL || strongSelf.inputSuspended) return;
     strongSelf.accumulatedMouseX += deltaX / 1.25f;
     strongSelf.accumulatedMouseY += -deltaY / 1.25f;
     int16_t x = (int16_t)strongSelf.accumulatedMouseX;
@@ -598,7 +742,7 @@ static int16_t nl_ios_axis(float value) {
   input.pressedChangedHandler = ^(GCControllerButtonInput* button, float value, BOOL pressed) { \
     (void)button; (void)value; \
     nl_runtime_t* runtime = nl_ios_runtime(weakSelf.renderer); \
-    if (runtime != NULL) nl_send_mouse_button(runtime, code, pressed); \
+    if (runtime != NULL && !weakSelf.inputSuspended) nl_send_mouse_button(runtime, code, pressed); \
   }
   BIND_MOUSE_BUTTON(mouse.mouseInput.leftButton, BUTTON_LEFT);
   BIND_MOUSE_BUTTON(mouse.mouseInput.middleButton, BUTTON_MIDDLE);
@@ -610,6 +754,7 @@ static int16_t nl_ios_axis(float value) {
 #undef BIND_MOUSE_BUTTON
 }
 - (void)start {
+  self.virtualNumber = NSNotFound;
   self.observers = [NSMutableArray array];
   self.controllerNumbers = [NSMapTable weakToStrongObjectsMapTable];
   self.announcedControllers = [NSMutableSet set];
@@ -663,7 +808,29 @@ static int16_t nl_ios_axis(float value) {
       gamepad.valueChangedHandler(gamepad, gamepad.buttonA);
   }
 }
+- (void)sendVirtualGamepad:(NolandVirtualGamepadState)state enabled:(BOOL)enabled {
+  nl_runtime_t* runtime = nl_ios_runtime(self.renderer);
+  if (!runtime) return;
+  if (!enabled) {
+    NSUInteger number = self.virtualNumber;
+    self.virtualNumber = NSNotFound; self.virtualAnnounced = NO;
+    if (number < 16) nl_send_controller(runtime, (uint16_t)number, [self activeMask], 0, 0, 0, 0, 0, 0, 0);
+    return;
+  }
+  if (self.virtualNumber == NSNotFound) self.virtualNumber = [self nextControllerNumber];
+  if (self.virtualNumber == NSNotFound) return;
+  uint16_t mask = [self activeMask];
+  if (!self.virtualAnnounced) {
+    uint32_t buttons = A_FLAG | B_FLAG | X_FLAG | Y_FLAG | UP_FLAG | DOWN_FLAG | LEFT_FLAG | RIGHT_FLAG |
+        LB_FLAG | RB_FLAG | PLAY_FLAG | BACK_FLAG | LS_CLK_FLAG | RS_CLK_FLAG;
+    self.virtualAnnounced = nl_send_controller_arrival(runtime, (uint8_t)self.virtualNumber, mask, LI_CTYPE_XBOX, buttons, 0) == NL_RESULT_OK;
+  }
+  if (self.inputSuspended) state = (NolandVirtualGamepadState){0};
+  nl_send_controller(runtime, (uint16_t)self.virtualNumber, mask, state.buttons,
+      state.leftTrigger, state.rightTrigger, state.leftX, state.leftY, state.rightX, state.rightY);
+}
 - (void)stop {
+  [self sendVirtualGamepad:(NolandVirtualGamepadState){0} enabled:NO];
   for (id observer in self.observers) [NSNotificationCenter.defaultCenter removeObserver:observer];
   for (GCController* controller in GCController.controllers) controller.extendedGamepad.valueChangedHandler = nil;
   if (@available(iOS 14.0, *)) {
@@ -1252,9 +1419,18 @@ void noland_performance_overlay_update(void* handle, const char* text) {
     UIView* view = (__bridge UIView*)handle;
     UILabel* label = (UILabel*)[view viewWithTag:1003];
     if (![label isKindOfClass:[UILabel class]]) return;
-    label.text = value;
+    NSMutableParagraphStyle* paragraph = [NSMutableParagraphStyle new];
+    paragraph.minimumLineHeight = 10;
+    paragraph.maximumLineHeight = 10;
+    paragraph.lineSpacing = 0;
+    label.attributedText = [[NSAttributedString alloc] initWithString:value attributes:@{
+      NSFontAttributeName: label.font,
+      NSForegroundColorAttributeName: UIColor.whiteColor,
+      NSParagraphStyleAttributeName: paragraph
+    }];
     label.accessibilityValue = value;
     label.hidden = value.length == 0;
+    [label.superview setNeedsLayout];
   });
 }
 
@@ -1285,6 +1461,7 @@ void nl_video_renderer_platform_attach_surface(nl_video_renderer_t* renderer, co
       ctx->controller_input.renderer = renderer;
       [ctx->controller_input start];
     }
+    if ([view isKindOfClass:NolandStreamView.class]) [((NolandStreamView*)view).controls refreshGamepad];
     nl_ios_start_lifecycle_observers(renderer, ctx);
 
     if (ctx->layer == nil) {
@@ -1364,6 +1541,7 @@ void nl_video_renderer_platform_start(nl_video_renderer_t* renderer) {
 
     if (ctx->layer != nil) [ctx->layer flushAndRemoveImage];
     [ctx->controller_input announceControllers];
+    if ([view isKindOfClass:NolandStreamView.class]) [((NolandStreamView*)view).controls refreshGamepad];
 
     if (ctx->display_link != nil) {
       [ctx->display_link invalidate];

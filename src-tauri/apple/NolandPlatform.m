@@ -98,23 +98,7 @@ void noland_ios_response_free(char *value) { free(value); }
     self.surface = [[UIView alloc] initWithFrame:self.view.bounds];
     self.surface.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     [self.view addSubview:self.surface];
-    UIButton *controls = [UIButton buttonWithType:UIButtonTypeSystem];
-    [controls setTitle:NSLocalizedString(@"Controls", nil) forState:UIControlStateNormal];
-    controls.accessibilityLabel = NSLocalizedString(@"Return to Noland controls", nil);
-    controls.backgroundColor = [UIColor.blackColor colorWithAlphaComponent:0.75];
-    controls.tintColor = UIColor.whiteColor;
-    controls.layer.cornerRadius = 8;
-    controls.translatesAutoresizingMaskIntoConstraints = NO;
-    [controls addTarget:self action:@selector(showControls) forControlEvents:UIControlEventTouchUpInside];
-    [self.view addSubview:controls];
-    [NSLayoutConstraint activateConstraints:@[
-        [controls.topAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.topAnchor constant:8],
-        [controls.trailingAnchor constraintEqualToAnchor:self.view.safeAreaLayoutGuide.trailingAnchor constant:-8],
-        [controls.heightAnchor constraintGreaterThanOrEqualToConstant:44],
-        [controls.widthAnchor constraintGreaterThanOrEqualToConstant:100]
-    ]];
 }
-- (void)showControls { [self dismissViewControllerAnimated:NO completion:nil]; }
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations {
