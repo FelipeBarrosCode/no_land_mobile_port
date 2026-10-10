@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>method</key>
+  <string>app-store-connect</string>
+  <key>destination</key>
+  <string>export</string>
+  <key>teamID</key>
+  <string>U66WLT4SP6</string>
+  <key>signingStyle</key>
+  <string>manual</string>
+  <key>signingCertificate</key>
+  <string>92E16C49A16DA7F5C639F461B0738E65F3679E80</string>
+  <key>provisioningProfiles</key>
+  <dict>
+    <key>noland.main.app</key>
+    <string>noland main app on appstore</string>
+    <key>noland.main.app.PacketTunnel</key>
+    <string>Noland packet tunnel</string>
+  </dict>
+  <key>manageAppVersionAndBuildNumber</key>
+  <false/>
+  <key>stripSwiftSymbols</key>
+  <true/>
+  <key>uploadSymbols</key>
+  <true/>
+</dict>
+</plist>

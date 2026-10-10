@@ -121,13 +121,32 @@ jobs:
           echo "NOLAND_SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
       - name: Generate Xcode project and signed App Store IPA
         run: |
+          set -euo pipefail
           npm run tauri:ios:init
-          npm run tauri:ios:build -- --target aarch64 --ci --export-method app-store-connect
+          set +e
+          npm run tauri:ios:build -- \
+            --target aarch64 \
+            --ci \
+            --build-number "${{ steps.release.outputs.build_number }}" \
+            --export-method app-store-connect
+          tauri_status=$?
+          set -e
+          ARCHIVE="$(find src-tauri/gen/apple/build -maxdepth 2 -type d -name '*.xcarchive' -print -quit)"
+          if [[ -z "$ARCHIVE" || ! -d "$ARCHIVE" ]]; then
+            echo "Tauri exited $tauri_status without producing an Xcode archive" >&2
+            exit "${tauri_status:-1}"
+          fi
+          EXPORT_DIR="$GITHUB_WORKSPACE/src-tauri/gen/apple/build/app-store"
+          mkdir -p "$EXPORT_DIR"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE" \
+            -exportPath "$EXPORT_DIR" \
+            -exportOptionsPlist src-tauri/apple/ExportOptions-AppStore.plist
       - name: Locate and verify signed IPA
         id: ipa
         run: |
           set -euo pipefail
-          IPA="$(find src-tauri/gen/apple/build -type f -name '*.ipa' -print -quit)"
+          IPA="$(find src-tauri/gen/apple/build/app-store -type f -name '*.ipa' -print -quit)"
           test -n "$IPA"
           echo "path=$IPA" >> "$GITHUB_OUTPUT"
           unzip -t "$IPA" >/dev/null
