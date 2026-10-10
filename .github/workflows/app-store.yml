@@ -103,8 +103,8 @@ jobs:
           [[ "$tunnel_identifier" == "U66WLT4SP6.noland.main.app.PacketTunnel" ]]
           [[ "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' "$RUNNER_TEMP/app-profile.plist")" == "false" ]]
           [[ "$(/usr/libexec/PlistBuddy -c 'Print :Entitlements:get-task-allow' "$RUNNER_TEMP/tunnel-profile.plist")" == "false" ]]
-          /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.networking.networkextension:0' "$RUNNER_TEMP/app-profile.plist" | grep -qx 'packet-tunnel-provider'
-          /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.networking.networkextension:0' "$RUNNER_TEMP/tunnel-profile.plist" | grep -qx 'packet-tunnel-provider'
+          /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.networking.networkextension' "$RUNNER_TEMP/app-profile.plist" | grep -q 'packet-tunnel-provider'
+          /usr/libexec/PlistBuddy -c 'Print :Entitlements:com.apple.developer.networking.networkextension' "$RUNNER_TEMP/tunnel-profile.plist" | grep -q 'packet-tunnel-provider'
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
           security set-keychain-settings -lut 21600 "$KEYCHAIN"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
