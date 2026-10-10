@@ -24,7 +24,7 @@ concurrency:
 
 jobs:
   archive:
-    runs-on: macos-15
+    runs-on: macos-26
     timeout-minutes: 120
     environment: app-store
     steps:
@@ -45,6 +45,12 @@ jobs:
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+      - name: Require App Store SDK
+        run: |
+          xcodebuild -version
+          sdk_version="$(xcrun --sdk iphoneos --show-sdk-version)"
+          echo "iPhoneOS SDK: $sdk_version"
+          [[ "${sdk_version%%.*}" -ge 26 ]]
       - name: Install project tools
         run: brew install xcodegen
       - name: Install JavaScript dependencies
