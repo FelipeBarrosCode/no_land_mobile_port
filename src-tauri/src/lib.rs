@@ -176,8 +176,6 @@ pub fn run() {
                     &format!("Failed loading persisted state; deleting and recreating it: {error}"),
                 ),
             };
-            let mut detected_stream_defaults = detect_client_display_for_provisioning();
-
             let mut state_changed = false;
             if initial_state
                 .server_preferences
@@ -357,14 +355,6 @@ pub fn run() {
                 );
             }
 
-            if detected_stream_defaults.is_none() {
-                detected_stream_defaults = Some((
-                    effective_stream_width,
-                    effective_stream_height,
-                    effective_stream_refresh_hz,
-                ));
-            }
-
             if initial_state.sunshine.edid_mode != crate::models::app_state::EdidMode::Manual {
                 let desired_refresh = effective_stream_refresh_hz
                     .clamp(EDID_MIN_REFRESH_HZ, EDID_MAX_REFRESH_HZ);
@@ -449,20 +439,19 @@ pub fn run() {
                 app_data_dir.clone(),
             );
             if moonlight_bootstrap_created {
-                if let Some((default_stream_width, default_stream_height, _)) = detected_stream_defaults {
-                    if let Err(error) = moonlight_manager.repository.update(|configuration| {
-                        let video = &mut configuration.defaults.video;
-                        video.width = default_stream_width;
-                        video.height = default_stream_height;
-                        video.color_range = ColorRange::Full;
-                        Ok(())
-                    }) {
+                if let Err(error) = moonlight_manager.repository.update(|configuration| {
+                    let video = &mut configuration.defaults.video;
+                    video.width = 1920;
+                    video.height = 1080;
+                    video.fps = 60;
+                    video.color_range = ColorRange::Full;
+                    Ok(())
+                }) {
                         let message = format!(
                             "Failed seeding embedded Moonlight defaults, continuing with generated defaults: {error}"
                         );
                         write_startup_diagnostic("moonlight-seed", &message);
                         warn!("{message}");
-                    }
                 }
             }
             moonlight_manager

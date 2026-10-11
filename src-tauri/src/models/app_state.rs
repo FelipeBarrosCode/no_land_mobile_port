@@ -502,7 +502,7 @@ pub enum EdidMode {
 }
 
 fn default_edid_mode() -> EdidMode {
-    EdidMode::AutoDetect
+    EdidMode::Manual
 }
 
 fn default_edid_refresh_rate_hz() -> u32 {
@@ -510,7 +510,7 @@ fn default_edid_refresh_rate_hz() -> u32 {
 }
 
 fn default_edid_source_label() -> String {
-    "Auto-Detected".to_string()
+    "Manual 1920x1080@60".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -17,7 +17,14 @@ impl RcloneRemoteConfig {
     }
 
     pub fn entry(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.config_entries.push((key.into(), value.into()));
+        // rclone's INI format is line-oriented. Keep provider/user values on
+        // one line so a credential or endpoint cannot inject config options.
+        let key = key.into().replace(['\r', '\n'], "");
+        let value = value
+            .into()
+            .replace("\r\n", "\\n")
+            .replace(['\r', '\n'], "\\n");
+        self.config_entries.push((key, value));
         self
     }
 
@@ -42,7 +49,7 @@ impl RcloneRoot {
         if self.root.trim().is_empty() {
             format!("{}:", self.remote_name)
         } else {
-            format!("{}:{}", self.remote_name, self.root.trim_matches('/'))
+            format!("{}:{}", self.remote_name, self.root.trim_end_matches('/'))
         }
     }
 
@@ -54,7 +61,7 @@ impl RcloneRoot {
             format!(
                 "{}:{}/{}",
                 self.remote_name,
-                self.root.trim_matches('/'),
+                self.root.trim_end_matches('/'),
                 key
             )
         }

@@ -3,7 +3,6 @@ import { useEffect, useRef, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
-import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { useAppStore } from "../../store/appStore";
 import type {
   ProviderDefinition,
@@ -60,8 +59,6 @@ export function SharedStorageSettingsV2({
   const [showProviderPicker, setShowProviderPicker] = useState(false);
   const [formValues, setFormValues] = useState<Record<string, string>>({});
   const [displayName, setDisplayName] = useState("");
-  const [bucket, setBucket] = useState<string | null>(null);
-  const [prefix, setPrefix] = useState<string | null>(null);
 
   // Track the end of an OAuth session so completing authorization can land on
   // the connected-provider card instead of bouncing back to the initial form.
@@ -99,21 +96,21 @@ export function SharedStorageSettingsV2({
     setOauthJustCompleted(false);
     setSelectedProvider(null);
     setFormValues({});
-    setBucket(null);
-    setPrefix(null);
     setDisplayName("");
   }, [oauthJustCompleted, profiles]);
 
   const connectedProfile = profiles.find((profile) => profile.active) ?? profiles[0] ?? null;
   const selectedProviderFields = selectedProvider?.fields ?? [];
-  const hasDedicatedBucketField = selectedProviderFields.some((field) => field.key === "bucket");
-  const hasDedicatedPrefixField = selectedProviderFields.some((field) => field.key === "prefix");
-  const staticCredentialFields = selectedProviderFields.filter(
-    (field) => !["bucket", "prefix"].includes(field.key),
-  );
+  const staticCredentialFields = selectedProviderFields;
   const oauthProviderFields = selectedProviderFields.filter(
     (field) => !["client_id", "client_secret"].includes(field.key),
   );
+  const requiredFieldsPresent = selectedProviderFields
+    .filter((field) => field.required)
+    .every((field) => (formValues[field.key] || "").trim().length > 0);
+  const sftpAuthenticationPresent = selectedProvider?.provider !== "sftp"
+    || [formValues["password"], formValues["private_key"]]
+      .some((value) => (value || "").trim().length > 0);
 
   const categorizedProviders = providers.reduce<Record<string, ProviderDefinition[]>>(
     (acc, p) => {
@@ -125,11 +122,18 @@ export function SharedStorageSettingsV2({
     {},
   );
 
-  const PROVIDER_PROMPT_MAP: Record<string, string> = {};
-
   function handleProviderSelect(provider: ProviderDefinition) {
     setSelectedProvider(provider);
-    setFormValues({});
+    setFormValues(Object.fromEntries(provider.fields.flatMap((field) => {
+      if (typeof field.fieldType === "object" && field.fieldType !== null && "options" in field.fieldType) {
+        const firstValue = field.fieldType.options[0]?.value;
+        return firstValue ? [[field.key, firstValue]] : [];
+      }
+      if (field.fieldType === "toggle") {
+        return [[field.key, "false"]];
+      }
+      return [];
+    })));
     setDisplayName(provider.label);
     setShowProviderPicker(false);
   }
@@ -140,8 +144,12 @@ export function SharedStorageSettingsV2({
 
   async function handleConnect() {
     if (!selectedProvider) return;
-    const effectiveBucket = (bucket || formValues["bucket"] || "").trim() || null;
-    const effectivePrefix = (prefix || formValues["prefix"] || "").trim() || null;
+    const effectiveBucket = (
+      formValues["bucket"] || formValues["space_name"] || formValues["container"] || ""
+    ).trim() || null;
+    const effectivePrefix = (
+      formValues["prefix"] || formValues["folder"] || formValues["remote_path"] || ""
+    ).trim() || null;
     await onConnectProvider(
       selectedProvider.provider,
       formValues,
@@ -151,8 +159,6 @@ export function SharedStorageSettingsV2({
     );
     setSelectedProvider(null);
     setFormValues({});
-    setBucket(null);
-    setPrefix(null);
   }
 
   return (
@@ -164,21 +170,6 @@ export function SharedStorageSettingsV2({
             <h3 className="text-lg font-display text-neon-cyan">
               {translate("generated.0e9614b59ef4c78b")}
             </h3>
-            <AIPromptHelper
-              topic={translate("generated.db4dc7d44e7e2a36")}
-              promptText={`# Shared Storage
-
-Noland Shared Storage keeps your games, applications, saves, settings, and mods available across your Noland instances.
-
-## Choosing a provider
-
-- **Object Storage** (B2, S3, R2): Best for frequent backups. Pay per GB stored.
-- **Cloud Drives** (Google Drive, OneDrive, Dropbox): Convenient if you already have an account.
-- **Enterprise / Self-hosted** (Azure, GCS, SFTP, WebDAV): For advanced setups.
-
-All data is encrypted before upload and can only be decrypted with your repository key.`}
-              variant="icon"
-            />
           </div>
           <p className="text-sm text-gray-400 mb-6">
             {translate("generated.1d70042e1ff9b60f")}
@@ -345,13 +336,6 @@ All data is encrypted before upload and can only be decrypted with your reposito
                       )}
                       <div className="flex items-center justify-between gap-2">
                         <p className="text-gray-200 font-medium">{translateSource(provider.label)}</p>
-                        {PROVIDER_PROMPT_MAP[provider.provider] && (
-                          <AIPromptHelper
-                            topic={translate("storage.provider.setup.topic", { provider: provider.label })}
-                            promptText={PROVIDER_PROMPT_MAP[provider.provider]}
-                            variant="icon"
-                          />
-                        )}
                       </div>
                       <p className="text-xs text-gray-500 mt-1">{translateSource(provider.description)}</p>
                     </button>
@@ -371,13 +355,6 @@ All data is encrypted before upload and can only be decrypted with your reposito
               <h3 className="text-lg font-display text-neon-cyan">
                 {translate("generated.6defafa2caa65304")} {selectedProvider.label}
               </h3>
-              {PROVIDER_PROMPT_MAP[selectedProvider.provider] && (
-                <AIPromptHelper
-                  topic={translate("storage.provider.setup.topic", { provider: selectedProvider.label })}
-                  promptText={PROVIDER_PROMPT_MAP[selectedProvider.provider]}
-                  variant="icon"
-                />
-              )}
             </div>
             <Button variant="ghost" onClick={() => setSelectedProvider(null)}>
               {translate("generated.9f73d5ebe9024c6b")}
@@ -402,6 +379,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
                       value={formValues[field.key] || field.fieldType.options[0]?.value || ""}
                       onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
                       disabled={busy}
+                      required={field.required}
                     >
                       {field.fieldType.options.map((option) => (
                         <option key={option.value} value={option.value}>
@@ -425,40 +403,47 @@ All data is encrypted before upload and can only be decrypted with your reposito
                   </label>
                 );
               }
+              if (field.key === "private_key") {
+                return (
+                  <label key={field.key} className="flex flex-col gap-2 text-base">
+                    <span className="font-display text-[10px] uppercase tracking-[0.14em] text-[#9ad9ff]">
+                      {translateSource(field.label)}
+                    </span>
+                    <textarea
+                      className="min-h-36 border border-[#3f476c] bg-[#0b0f23] px-3 py-2 font-mono text-sm text-[#dff8ff] outline-none focus:border-neon-cyan"
+                      value={formValues[field.key] || ""}
+                      onChange={(event) => handleFieldChange(field.key, event.currentTarget.value)}
+                      placeholder={field.placeholder ? translateSource(field.placeholder) : ""}
+                      disabled={busy}
+                    />
+                    {field.helpText && (
+                      <span className="text-xs text-gray-400">{translateSource(field.helpText)}</span>
+                    )}
+                  </label>
+                );
+              }
               return (
-                <InputField
-                  key={field.key}
-                  label={translateSource(field.label)}
-                  value={formValues[field.key] || ""}
-                  onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
-                  placeholder={field.placeholder ? translateSource(field.placeholder) : ""}
-                  type={typeof field.fieldType === "string" && field.fieldType === "password" ? "password" : "text"}
-                  disabled={busy}
-                />
+                <div key={field.key}>
+                  <InputField
+                    label={translateSource(field.label)}
+                    value={formValues[field.key] || ""}
+                    onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
+                    placeholder={field.placeholder ? translateSource(field.placeholder) : ""}
+                    type={typeof field.fieldType === "string" && field.fieldType === "password" ? "password" : "text"}
+                    disabled={busy}
+                    required={field.required}
+                  />
+                  {field.helpText && (
+                    <p className="mt-1 text-xs text-gray-400">{translateSource(field.helpText)}</p>
+                  )}
+                </div>
               );
             })}
-
-            {!hasDedicatedBucketField && (
-              <InputField
-                label={translate("generated.ebb53106f5eb44b5")}
-                value={bucket || ""}
-                onChange={(e) => setBucket(e.currentTarget.value || null)}
-                placeholder={translate("generated.800f2e137fa1c022")}
-              />
-            )}
-            {!hasDedicatedPrefixField && (
-              <InputField
-                label={translate("generated.9eb94e768d3f763e")}
-                value={prefix || ""}
-                onChange={(e) => setPrefix(e.currentTarget.value || null)}
-                placeholder={translate("generated.d00182a96d461ba3")}
-              />
-            )}
 
             <Button
               variant="primary"
               onClick={handleConnect}
-              disabled={busy || displayName.trim().length < 2}
+              disabled={busy || displayName.trim().length < 2 || !requiredFieldsPresent || !sftpAuthenticationPresent}
               loading={busy}
               loadingText={translate("generated.5f04ae9ed6a865bb")}
             >
@@ -476,13 +461,6 @@ All data is encrypted before upload and can only be decrypted with your reposito
               <h3 className="text-lg font-display text-neon-cyan">
                 {translate("generated.b6741b4ccf6d675a")} {selectedProvider.label}
               </h3>
-              {PROVIDER_PROMPT_MAP[selectedProvider.provider] && (
-                <AIPromptHelper
-                  topic={translate("storage.provider.setup.topic", { provider: selectedProvider.label })}
-                  promptText={PROVIDER_PROMPT_MAP[selectedProvider.provider]}
-                  variant="icon"
-                />
-              )}
             </div>
             <Button variant="ghost" onClick={() => setSelectedProvider(null)}>
               {translate("generated.9f73d5ebe9024c6b")}
@@ -490,7 +468,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
           </div>
 
           <p className="text-sm text-gray-400 mb-4">
-            {selectedProvider.label} {translate("generated.1bb25cdb464ff46a")}
+            {selectedProvider.label} {translateSource("requires credentials from your own OAuth application.")}
           </p>
 
           {!oauthSessionId && (
@@ -524,6 +502,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
                         value={formValues[field.key] || field.fieldType.options[0]?.value || ""}
                         onChange={(e) => handleFieldChange(field.key, e.currentTarget.value)}
                         disabled={busy}
+                        required={field.required}
                       >
                         {field.fieldType.options.map((option) => (
                           <option key={option.value} value={option.value}>
@@ -544,6 +523,7 @@ All data is encrypted before upload and can only be decrypted with your reposito
                     placeholder={field.placeholder ? translateSource(field.placeholder) : ""}
                     type={typeof field.fieldType === "string" && field.fieldType === "password" ? "password" : "text"}
                     disabled={busy}
+                    required={field.required}
                   />
                 );
               })}

@@ -1,6 +1,5 @@
 import { translate, translateSource } from "../../lib/i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
@@ -9,7 +8,6 @@ import type {
   OfferCountryAvailability,
   ServerPreferences,
 } from "../../lib/types";
-import { APP_PROMPTS } from "../../prompts/appPrompts";
 
 interface Props {
   open: boolean;
@@ -190,7 +188,9 @@ export function ServerPickerModal({
   const [sortMode, setSortMode] = useState<SortMode>("recommended");
   const [minPriceInput, setMinPriceInput] = useState("");
   const [maxPriceInput, setMaxPriceInput] = useState("");
-  const [minReliabilityInput, setMinReliabilityInput] = useState("");
+  const [minReliabilityInput, setMinReliabilityInput] = useState(
+    String(Math.round(serverPreferences.minReliability * 100)),
+  );
   const [maxReliabilityInput, setMaxReliabilityInput] = useState("");
   const [storageInput, setStorageInput] = useState(
     String(serverPreferences.storageGb || storageGb || ""),
@@ -239,6 +239,10 @@ export function ServerPickerModal({
   useEffect(() => {
     setStorageInput(String(serverPreferences.storageGb || ""));
   }, [serverPreferences.storageGb]);
+
+  useEffect(() => {
+    setMinReliabilityInput(String(Math.round(serverPreferences.minReliability * 100)));
+  }, [serverPreferences.minReliability]);
 
   const activeFilterCount = useMemo(
     () =>
@@ -363,6 +367,10 @@ export function ServerPickerModal({
 
     await onUpdateServerPreferences({
       geolocationCountryCode: isGlobal ? GLOBAL_COUNTRY_CODE : countryCode,
+      minReliability: Math.max(
+        0.8,
+        (parseOptionalNumber(minReliabilityInput) ?? 80) / 100,
+      ),
     });
 
     await onSearchOffers(1);
@@ -383,11 +391,6 @@ export function ServerPickerModal({
               {translate("generated.cabd2ed15ee04b2f")}
             </p>
           </div>
-          <AIPromptHelper
-            topic={translate("generated.12068e7621eda4b7")}
-            promptText={APP_PROMPTS.serverPickerModalHeader}
-            variant="icon"
-          />
         </div>
         <Button variant="ghost" onClick={onClose}>
           {translate("generated.7d9eb7acb13e2462")}
@@ -675,11 +678,6 @@ export function ServerPickerModal({
                       <h3 className="font-display text-[11px] leading-[1.45] text-white">
                         {offer.hostLabel}
                       </h3>
-                      <AIPromptHelper
-                        topic={translate("server.offering.topic", { instance: offer.hostLabel })}
-                        promptText={APP_PROMPTS.serverInstanceCard}
-                        variant="icon"
-                      />
                     </div>
                     <span className="border border-[#43508b] bg-[#1a2042] px-3 py-2 text-right font-display text-[13px] leading-none text-[#9ad9ff] shadow-[0_0_14px_rgba(154,217,255,0.12)]">
                       <span className="block text-[7px] uppercase tracking-[0.12em] text-[#7fa8cc]">

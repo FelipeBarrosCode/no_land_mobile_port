@@ -82,7 +82,9 @@ pub fn get_oauth_config(
             token_endpoint: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
             client_id: client_id.to_string(),
             client_secret: client_secret.map(String::from),
-            scopes: "Files.ReadWrite.AppFolder User.Read offline_access",
+            // rclone addresses the selected drive by ID and performs normal
+            // filesystem operations, which AppFolder-only permission cannot do.
+            scopes: "Files.ReadWrite User.Read offline_access",
             extra_auth_params: &[],
         }),
         crate::models::application_bundle::StorageProvider::Dropbox => Some(OAuthProviderConfig {
@@ -235,6 +237,38 @@ pub async fn refresh_token(
     }
 
     Ok(token)
+}
+
+/// Resolve the concrete drive selected by Microsoft for the authorized user.
+/// Rclone cannot construct an OneDrive filesystem from an OAuth token alone.
+pub async fn discover_onedrive_drive(access_token: &str) -> Result<(String, String), String> {
+    let response = reqwest::Client::new()
+        .get("https://graph.microsoft.com/v1.0/me/drive")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|error| format!("OneDrive metadata request failed: {error}"))?;
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Failed reading OneDrive metadata: {error}"))?;
+    if !status.is_success() {
+        return Err(format!("OneDrive metadata request failed: HTTP {status}"));
+    }
+    let value: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|error| format!("Invalid OneDrive metadata response: {error}"))?;
+    let drive_id = value
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| "OneDrive metadata did not contain a drive ID.".to_string())?;
+    let drive_type = value
+        .get("driveType")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| matches!(*value, "personal" | "business" | "documentLibrary"))
+        .ok_or_else(|| "OneDrive metadata contained an unsupported drive type.".to_string())?;
+    Ok((drive_id.to_string(), drive_type.to_string()))
 }
 
 #[cfg(test)]

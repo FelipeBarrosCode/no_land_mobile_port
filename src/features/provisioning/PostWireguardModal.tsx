@@ -2,9 +2,7 @@ import { translate, translateSource } from "../../lib/i18n";
 import { useMemo } from "react";
 import { Button } from "../../components/ui/Button";
 
-import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
-import { APP_PROMPTS } from "../../prompts/appPrompts";
 
 import type {
   OrchestrationState,
@@ -130,19 +128,6 @@ export function PostWireguardModal({
               : translate("generated.5d5de3cdf5086b8a")}
           </h3>
           <div className="flex items-center gap-2">
-            <AIPromptHelper
-              topic={
-                isWireguardPhase
-                  ? translate("generated.4b4703dd718bd7bd")
-                  : translate("generated.dfeadba6578179ba")
-              }
-              promptText={
-                isWireguardPhase
-                  ? APP_PROMPTS.wireguardModalInfo
-                  : APP_PROMPTS.playButtonSection
-              }
-              variant="both"
-            />
             <Button
               type="button"
               variant="ghost"

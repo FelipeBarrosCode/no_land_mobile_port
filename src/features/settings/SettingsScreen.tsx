@@ -2,8 +2,6 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { errorMessage } from "../../lib/errorMessage";
-import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
-import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
@@ -297,8 +295,6 @@ export function SettingsScreen({
   const [connectionStatusError, setConnectionStatusError] = useState<string | null>(null);
 
   const [serverForm, setServerForm] = useState({
-    minReliability: appState.serverPreferences.minReliability.toString(),
-    storageGb: appState.serverPreferences.storageGb.toString(),
     templateHash: appState.serverPreferences.templateHash,
   });
 
@@ -342,8 +338,6 @@ export function SettingsScreen({
     setEdidMode(appState.sunshine.edidMode);
     setEdidRefreshRateHz(appState.sunshine.edidRefreshRateHz.toString());
     setServerForm({
-      minReliability: appState.serverPreferences.minReliability.toString(),
-      storageGb: appState.serverPreferences.storageGb.toString(),
       templateHash: appState.serverPreferences.templateHash,
     });
     setClientForm({
@@ -638,32 +632,129 @@ export function SettingsScreen({
     </Card>
   );
 
+  const edidSettings = (
+    <SettingsSubsection
+      title={translate("generated.9a12d65bf2f96b18")}
+      description={translate("settings.display.source", { source: appState.sunshine.edidSourceLabel || translate("common.unknown") })}
+    >
+      <div className="grid gap-3 md:grid-cols-2">
+        <SelectField
+          label={translate("generated.4efbc56987dc1373")}
+          value={edidMode}
+          options={[
+            { value: "auto_detect", label: "Auto detect (Scaling matched)" },
+            { value: "mac_hardware", label: "Native Hardware (2560x1664 Panel)" },
+            { value: "manual", label: "Manual (use Moonlight width and height)" },
+          ]}
+          onChange={(value) =>
+            setEdidMode(value as "auto_detect" | "mac_hardware" | "manual")
+          }
+        />
+        <div>
+          <InputField
+            label={translate("generated.2ef8a7821645caab")}
+            value={edidRefreshRateHz}
+            onChange={(event) => setEdidRefreshRateHz(event.target.value)}
+          />
+          <SettingHelp>{translate("generated.5eaebf46eb9441b5")}</SettingHelp>
+        </div>
+      </div>
+      <div className="mt-3">
+        <Button
+          disabled={
+            busy ||
+            Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) < 30 ||
+            Math.round(toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz)) > 240
+          }
+          onClick={() =>
+            onRegenerateEdid({
+              mode: edidMode,
+              refreshRateHz: Math.round(
+                toNumber(edidRefreshRateHz, appState.sunshine.edidRefreshRateHz),
+              ),
+            })
+          }
+        >
+          {translate("generated.d6df35e700b6035e")}
+        </Button>
+      </div>
+    </SettingsSubsection>
+  );
+
+  const audioSettings = (
+    <SettingsSubsection
+      title={translate("generated.2e616a54da2f24b2")}
+      description={translate("generated.f6c4a1e6457c2848")}
+    >
+      <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
+        <div>
+          <SelectField
+            label={translate("generated.83ee39129dfebf6a")}
+            value={clientForm.hostaudio}
+            options={hostAudioOptions}
+            onChange={(value) =>
+              setClientForm((prev) => ({ ...prev, hostaudio: value }))
+            }
+          />
+          <SettingHelp>{translate("generated.b3115760b96af5f4")}</SettingHelp>
+        </div>
+        <div>
+          <SelectField
+            label={translate("generated.acfe057e2170a661")}
+            value={clientForm.showperfoverlay}
+            options={binaryOptions}
+            onChange={(value) =>
+              setClientForm((prev) => ({ ...prev, showperfoverlay: value }))
+            }
+          />
+          <SettingHelp>{translate("generated.eb05426e0a537a9c")}</SettingHelp>
+        </div>
+        <div>
+          <SelectField
+            label={translate("generated.620826e20f92aa2a")}
+            value={clientForm.showInputDebugHud}
+            options={binaryOptions}
+            onChange={(value) =>
+              setClientForm((prev) => ({ ...prev, showInputDebugHud: value }))
+            }
+          />
+          <SettingHelp>{translate("generated.a538cf0e6b35f405")}</SettingHelp>
+        </div>
+        <div>
+          <SelectField
+            label={translate("generated.1bc024181f58d2e3")}
+            value={clientForm.keepawake}
+            options={binaryOptions}
+            onChange={(value) =>
+              setClientForm((prev) => ({ ...prev, keepawake: value }))
+            }
+          />
+          <SettingHelp>{translate("generated.071adfaf3fa01245")}</SettingHelp>
+        </div>
+      </div>
+      <div className="mt-4">
+        <Button
+          disabled={busy}
+          onClick={() => onSaveMoonlightPreferences({
+            ...appState.moonlightPreferences,
+            hostaudio: Math.round(toNumber(clientForm.hostaudio, appState.moonlightPreferences.hostaudio)),
+            showperfoverlay: Math.round(toNumber(clientForm.showperfoverlay, appState.moonlightPreferences.showperfoverlay)),
+            keepawake: Math.round(toNumber(clientForm.keepawake, appState.moonlightPreferences.keepawake)),
+            showInputDebugHud: Math.round(toNumber(clientForm.showInputDebugHud, appState.moonlightPreferences.showInputDebugHud)),
+          })}
+        >
+          {translate("generated.17f8dec4dbda2261")}
+        </Button>
+      </div>
+    </SettingsSubsection>
+  );
+
   const serverPanel = (
     <Card className="pixel-frame min-w-0 overflow-hidden">
       <h2 className="font-display text-[11px] uppercase tracking-[0.12em] text-neon-lime">
         {translate("generated.65f170073c221c60")}
       </h2>
-      <div className="mt-4 grid gap-3 md:grid-cols-3">
-        <InputField
-          label={translate("generated.7e04950e0f3e2234")}
-          value={serverForm.minReliability}
-          onChange={(event) =>
-            setServerForm((prev) => ({
-              ...prev,
-              minReliability: event.target.value,
-            }))
-          }
-        />
-        <InputField
-          label={translate("generated.a40284164df96090")}
-          value={serverForm.storageGb}
-          onChange={(event) =>
-            setServerForm((prev) => ({
-              ...prev,
-              storageGb: event.target.value,
-            }))
-          }
-        />
+      <div className="mt-4">
         <InputField
           label={translate("generated.ba60293671c08c9d")}
           value={serverForm.templateHash}
@@ -680,45 +771,16 @@ export function SettingsScreen({
           disabled={busy || !serverForm.templateHash.trim()}
           onClick={() =>
             onSaveServerPreferences({
-              minReliability: Math.max(
-                0.8,
-                toNumber(
-                  serverForm.minReliability,
-                  appState.serverPreferences.minReliability,
-                ),
-              ),
-              storageGb: Math.max(
-                30,
-                Math.round(
-                  toNumber(
-                    serverForm.storageGb,
-                    appState.serverPreferences.storageGb,
-                  ),
-                ),
-              ),
               templateHash: serverForm.templateHash.trim(),
-              maxHourlyPrice: appState.serverPreferences.maxHourlyPrice,
-              minHourlyPrice: appState.serverPreferences.minHourlyPrice,
-              requireVerified: appState.serverPreferences.requireVerified,
-              requireDatacenter: appState.serverPreferences.requireDatacenter,
-              includeOnDemand: appState.serverPreferences.includeOnDemand,
-              includeInterruptible:
-                appState.serverPreferences.includeInterruptible,
-              includeReserved: appState.serverPreferences.includeReserved,
-              requireStaticIp: false,
-              requireAvx: appState.serverPreferences.requireAvx,
-              minGpuCount: 1,
-              minGpuRamGb: appState.serverPreferences.minGpuRamGb,
-              minCpuCores: appState.serverPreferences.minCpuCores,
-              minInetDownMbps: appState.serverPreferences.minInetDownMbps,
-              minInetUpMbps: appState.serverPreferences.minInetUpMbps,
-              geolocationCountryCode:
-                appState.serverPreferences.geolocationCountryCode,
             })
           }
         >
           {translate("generated.2f84105cebcdfbc2")}
         </Button>
+      </div>
+      <div className="mt-4 space-y-4">
+        {edidSettings}
+        {audioSettings}
       </div>
     </Card>
   );
@@ -731,71 +793,6 @@ export function SettingsScreen({
       <p className="mt-2 text-[1.1rem] text-[#a8bed6]">
         {translate("generated.7c3ce72f82bf0f7a")}
       </p>
-
-      <SettingsSubsection
-        title={translate("generated.9a12d65bf2f96b18")}
-        description={translate("settings.display.source", { source: appState.sunshine.edidSourceLabel || translate("common.unknown") })}
-      >
-        <div className="grid gap-3 md:grid-cols-2">
-          <SelectField
-            label={translate("generated.4efbc56987dc1373")}
-            value={edidMode}
-            options={[
-              { value: "auto_detect", label: "Auto detect (Scaling matched)" },
-              { value: "mac_hardware", label: "Native Hardware (2560x1664 Panel)" },
-              {
-                value: "manual",
-                label: "Manual (use Moonlight width and height)",
-              },
-            ]}
-            onChange={(value) =>
-              setEdidMode(value as "auto_detect" | "mac_hardware" | "manual")
-            }
-          />
-          <div>
-            <InputField
-              label={translate("generated.2ef8a7821645caab")}
-              value={edidRefreshRateHz}
-              onChange={(event) => setEdidRefreshRateHz(event.target.value)}
-            />
-            <SettingHelp>
-              {translate("generated.5eaebf46eb9441b5")}
-            </SettingHelp>
-          </div>
-        </div>
-        <div className="mt-3">
-          <Button
-            disabled={
-              busy ||
-              Math.round(
-                toNumber(
-                  edidRefreshRateHz,
-                  appState.sunshine.edidRefreshRateHz,
-                ),
-              ) < 30 ||
-              Math.round(
-                toNumber(
-                  edidRefreshRateHz,
-                  appState.sunshine.edidRefreshRateHz,
-                ),
-              ) > 240
-            }
-            onClick={() =>
-              onRegenerateEdid({
-                mode: edidMode,
-                refreshRateHz: Math.round(
-                  toNumber(
-                    edidRefreshRateHz,
-                    appState.sunshine.edidRefreshRateHz,
-                  ),
-                ),
-              })
-            }
-          >
-            {translate("generated.d6df35e700b6035e")}
-          </Button>
-        </div>
-      </SettingsSubsection>
 
       <div className="mt-4 space-y-4">
         <SettingsSubsection
@@ -946,66 +943,6 @@ export function SettingsScreen({
               />
               <SettingHelp>
                 {translate("generated.1ba9c5b8f4ae31ab")}
-              </SettingHelp>
-            </div>
-          </div>
-        </SettingsSubsection>
-
-        <SettingsSubsection
-          title={translate("generated.2e616a54da2f24b2")}
-          description={translate("generated.f6c4a1e6457c2848")}
-        >
-          <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            <div>
-              <SelectField
-                label={translate("generated.83ee39129dfebf6a")}
-                value={clientForm.hostaudio}
-                options={hostAudioOptions}
-                onChange={(value) =>
-                  setClientForm((prev) => ({ ...prev, hostaudio: value }))
-                }
-              />
-              <SettingHelp>
-                {translate("generated.b3115760b96af5f4")}
-              </SettingHelp>
-            </div>
-            <div>
-              <SelectField
-                label={translate("generated.acfe057e2170a661")}
-                value={clientForm.showperfoverlay}
-                options={binaryOptions}
-                onChange={(value) =>
-                  setClientForm((prev) => ({ ...prev, showperfoverlay: value }))
-                }
-              />
-              <SettingHelp>
-                {translate("generated.eb05426e0a537a9c")}
-              </SettingHelp>
-            </div>
-            <div>
-              <SelectField
-                label={translate("generated.620826e20f92aa2a")}
-                value={clientForm.showInputDebugHud}
-                options={binaryOptions}
-                onChange={(value) =>
-                  setClientForm((prev) => ({ ...prev, showInputDebugHud: value }))
-                }
-              />
-              <SettingHelp>
-                {translate("generated.a538cf0e6b35f405")}
-              </SettingHelp>
-            </div>
-            <div>
-              <SelectField
-                label={translate("generated.1bc024181f58d2e3")}
-                value={clientForm.keepawake}
-                options={binaryOptions}
-                onChange={(value) =>
-                  setClientForm((prev) => ({ ...prev, keepawake: value }))
-                }
-              />
-              <SettingHelp>
-                {translate("generated.071adfaf3fa01245")}
               </SettingHelp>
             </div>
           </div>
@@ -1528,11 +1465,6 @@ export function SettingsScreen({
               </h1>
             </div>
             <div className="hidden md:block">
-              <AIPromptHelper
-                topic={translate("generated.329d5f59f3636df1")}
-                promptText={APP_PROMPTS.settingsPage}
-                variant="both"
-              />
             </div>
           </div>
 
@@ -1555,13 +1487,6 @@ export function SettingsScreen({
           onClose={() => setMobileMenuOpen(false)}
         >
           {sectionButtons(true)}
-          <div className="mt-4 border-t border-[#343b68] pt-4">
-            <AIPromptHelper
-              topic={translate("generated.329d5f59f3636df1")}
-              promptText={APP_PROMPTS.settingsPage}
-              variant="both"
-            />
-          </div>
           <div className="mt-4 flex items-center justify-between border-t border-[#343b68] pt-4">
             <ArcadeSoundToggle />
             <Link to="/" onClick={() => setMobileMenuOpen(false)}>

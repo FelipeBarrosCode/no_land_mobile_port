@@ -1,7 +1,5 @@
 import { translate, translateSource } from "../../lib/i18n";
 import { useMemo, useState } from "react";
-import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
-import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { useNavigate } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
@@ -9,7 +7,6 @@ import type { BlockingActionState } from "../../components/ui/BlockingLoaderOver
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { HudBar } from "../../components/ui/HudBar";
-import { MicControls } from "../../components/ui/MicControls";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import { MobileMenuButton, MobileSideMenu } from "../../components/ui/MobileSideMenu";
 import { SpriteIcon } from "../../components/ui/SpriteIcon";
@@ -518,11 +515,6 @@ export function DashboardScreen({
                   {translate("generated.93c334eff4680565")}
                 </p>
                 <div className="flex items-center gap-2">
-                  <AIPromptHelper
-                    topic={translate("generated.02ae4e56fc76195a")}
-                    promptText={APP_PROMPTS.moonlightCard}
-                    variant="icon"
-                  />
                   <SpriteIcon icon="moonlight" />
                 </div>
               </div>
@@ -546,11 +538,6 @@ export function DashboardScreen({
                       {translate("generated.52a74e1ffc3f1baa")}
                     </p>
                     <div className="flex items-center gap-2">
-                      <AIPromptHelper
-                        topic={translate("generated.f2e5326591175e88")}
-                        promptText={APP_PROMPTS.wireguardCard}
-                        variant="icon"
-                      />
                       <SpriteIcon icon="settings" />
                     </div>
                   </div>
@@ -574,11 +561,6 @@ export function DashboardScreen({
                   {translate("generated.63de981f20f1b79e")}
                 </p>
                 <div className="flex items-center gap-2">
-                  <AIPromptHelper
-                    topic={translate("generated.0715b661bc09caf0")}
-                    promptText={APP_PROMPTS.setServerCard}
-                    variant="icon"
-                  />
                   <SpriteIcon icon="server" />
                 </div>
               </div>
@@ -689,11 +671,6 @@ export function DashboardScreen({
                 <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">
                   {translate("generated.377987be4b69f067")}
                 </h3>
-                <AIPromptHelper
-                  topic={translate("generated.1c38c4fc3cc17d82")}
-                  promptText={APP_PROMPTS.rentedServersSection}
-                  variant="icon"
-                />
                 {blockingAction &&
                   blockingAction.key.startsWith("instance.") && (
                     <p
@@ -757,7 +734,7 @@ export function DashboardScreen({
                          disabled={busy || !isActive}
                         onClick={() => setTerminalInstanceId(instance.instanceId)}
                       >
-                        <span aria-hidden="true">{translate("generated.77d57e39b407cbca")}</span>
+                        <SpriteIcon icon="terminal" className="h-5 w-5" />
                       </Button>
                       <Button
                         variant="ghost"
@@ -890,12 +867,6 @@ export function DashboardScreen({
                       onSyncStorage={handleSyncStorage}
                     />
                   </div>
-                  {isActive && (
-                    <div className="mt-3">
-                      <MicControls instanceId={instance.instanceId} />
-                    </div>
-                  )}
-
                 </Card>
                   );
                 })()
@@ -921,11 +892,6 @@ export function DashboardScreen({
                 <h3 className="font-display text-sm uppercase tracking-[0.12em] text-white">
                   {translate("generated.8167946ca4e902a1")}
                 </h3>
-                <AIPromptHelper
-                  topic={translate("generated.4635f03c5fe75af6")}
-                  promptText={APP_PROMPTS.selectedServerSection}
-                  variant="icon"
-                />
               </div>
               <StatusPill state={appState.orchestrationState} />
             </div>
@@ -1026,11 +992,6 @@ export function DashboardScreen({
                   <p className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-lime">
                     {translate("generated.64cff1319d2fd2cb")}
                   </p>
-                  <AIPromptHelper
-                    topic={translate("generated.b1eb2b632a9b1918")}
-                    promptText={APP_PROMPTS.playButtonSection}
-                    variant="icon"
-                  />
                 </div>
                 <SpriteIcon icon="play" />
               </div>
@@ -1229,11 +1190,6 @@ export function DashboardScreen({
               >
                 {translate("generated.91d66582898286d6")}
               </h3>
-              <AIPromptHelper
-                topic={translate("generated.baa665733259cd2c")}
-                promptText={APP_PROMPTS.wireguardModalInfo}
-                variant="both"
-              />
             </div>
 
             <div className="space-y-4 text-[1.2rem] leading-relaxed text-[#c5d8ec]">

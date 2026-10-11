@@ -1,6 +1,6 @@
 import clsx from "clsx";
 
-type IconName = "moonlight" | "server" | "play" | "settings" | "help" | "destroy" | "copy" | "close" | "robot";
+type IconName = "moonlight" | "server" | "play" | "settings" | "help" | "destroy" | "copy" | "close" | "robot" | "terminal";
 
 interface Props {
   icon: IconName;
@@ -81,6 +81,14 @@ const sprites: Record<IconName, number[]> = {
     0, 2, 2, 2, 2, 0,
     2, 2, 2, 2, 2, 2,
     2, 0, 2, 2, 0, 2
+  ],
+  terminal: [
+    2, 2, 2, 2, 2, 2,
+    2, 0, 0, 0, 0, 2,
+    2, 3, 0, 0, 0, 2,
+    2, 0, 3, 0, 0, 2,
+    2, 0, 3, 3, 0, 2,
+    2, 2, 2, 2, 2, 2
   ]
 };
 export function SpriteIcon({ icon, className }: Props) {

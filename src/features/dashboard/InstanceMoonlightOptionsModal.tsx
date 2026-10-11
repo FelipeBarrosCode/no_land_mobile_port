@@ -7,8 +7,6 @@ import {
   moonlightUpdateHostLatencyPreferences,
 } from "../../lib/backend";
 import type {
-  MoonlightFrameBufferMode,
-  MoonlightPacingMode,
   NolandLatencyConfig,
   RentedInstanceSummary,
 } from "../../lib/types";
@@ -179,50 +177,6 @@ export function InstanceMoonlightOptionsModal({ instance, onClose }: Props) {
                 updateLatency({ autoReconnectOnUnexpectedTermination: checked })
               }
             />
-
-            <div className="grid gap-3 sm:grid-cols-2">
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-[#d7e6f7]">
-                  {translate("generated.3d82644280c832dc")}
-                </span>
-                <select
-                  className="w-full rounded border border-[#354269] bg-[#080d1f] px-3 py-2 text-white outline-none focus:border-neon-cyan"
-                  value={latency.pacingMode}
-                  disabled={saving}
-                  onChange={(event) =>
-                    updateLatency({
-                      pacingMode: event.target.value as MoonlightPacingMode,
-                    })
-                  }
-                >
-                  <option value="off">{translate("generated.ca7981b46ecf2c17")}</option>
-                  <option value="automatic">{translate("generated.d461a493a3753877")}</option>
-                  <option value="software">{translate("generated.9b3289a385a5301e")}</option>
-                  <option value="hardwareMultiple">{translate("generated.a2562853e81c4347")}</option>
-                </select>
-              </label>
-              <label className="block">
-                <span className="mb-2 block text-sm font-medium text-[#d7e6f7]">
-                  {translate("generated.174bb641a341407c")}
-                </span>
-                <select
-                  className="w-full rounded border border-[#354269] bg-[#080d1f] px-3 py-2 text-white outline-none focus:border-neon-cyan"
-                  value={latency.frameBufferMode}
-                  disabled={saving}
-                  onChange={(event) =>
-                    updateLatency({
-                      frameBufferMode: event.target
-                        .value as MoonlightFrameBufferMode,
-                    })
-                  }
-                >
-                  <option value="off">{translate("generated.7976238fbfa4a2ac")}</option>
-                  <option value="oneFrame">{translate("generated.7b6ae5d47c287709")}</option>
-                  <option value="twoFrames">{translate("generated.d2e40bcf12edaec0")}</option>
-                  <option value="threeFrames">{translate("generated.32f0047e2904db75")}</option>
-                </select>
-              </label>
-            </div>
 
             <p className="text-xs text-[#8fa7c6]">
               {translate("generated.364c7533383aad88")}

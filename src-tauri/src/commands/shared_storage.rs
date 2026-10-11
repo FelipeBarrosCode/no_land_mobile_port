@@ -44,6 +44,7 @@ pub async fn save_static_provider_credentials(
 
     let raw_fields: HashMap<String, String> = serde_json::from_str(&credentials_json)
         .map_err(|e| AppError::InvalidInput(format!("Invalid credentials payload: {e}")))?;
+    validate_required_provider_fields(&provider, &raw_fields)?;
     let credentials = build_storage_credentials(&provider, &raw_fields)?;
 
     let manager = get_profile_manager();
@@ -260,12 +261,22 @@ fn build_storage_credentials(
             username: required_field(raw_fields, "account_name")?.to_string(),
             password: required_field(raw_fields, "account_key")?.to_string(),
         }),
-        StorageProvider::Sftp | StorageProvider::Webdav => {
-            Ok(StorageCredential::UsernamePassword {
-                username: required_field(raw_fields, "username")?.to_string(),
-                password: required_field(raw_fields, "password")?.to_string(),
-            })
+        StorageProvider::Sftp => {
+            let username = required_field(raw_fields, "username")?.to_string();
+            if let Some(password) = optional_field(raw_fields, "password") {
+                Ok(StorageCredential::UsernamePassword { username, password })
+            } else {
+                Ok(StorageCredential::SshKey {
+                    username,
+                    private_key: required_field(raw_fields, "private_key")?.to_string(),
+                    passphrase: optional_field(raw_fields, "passphrase"),
+                })
+            }
         }
+        StorageProvider::Webdav => Ok(StorageCredential::UsernamePassword {
+            username: required_field(raw_fields, "username")?.to_string(),
+            password: required_field(raw_fields, "password")?.to_string(),
+        }),
         StorageProvider::GoogleDrive
         | StorageProvider::MicrosoftOneDrive
         | StorageProvider::Dropbox
@@ -275,6 +286,34 @@ fn build_storage_credentials(
         ))
         .into()),
     }
+}
+
+fn validate_required_provider_fields(
+    provider: &StorageProvider,
+    raw_fields: &HashMap<String, String>,
+) -> Result<(), FrontendError> {
+    for field in provider.definition().fields {
+        if field.required
+            && raw_fields
+                .get(&field.key)
+                .map(|value| value.trim().is_empty())
+                .unwrap_or(true)
+        {
+            return Err(
+                AppError::InvalidInput(format!("Missing required field: {}", field.key)).into(),
+            );
+        }
+    }
+    if provider == &StorageProvider::Sftp
+        && optional_field(raw_fields, "password").is_none()
+        && optional_field(raw_fields, "private_key").is_none()
+    {
+        return Err(AppError::InvalidInput(
+            "SFTP requires either a password or a PEM private key.".to_string(),
+        )
+        .into());
+    }
+    Ok(())
 }
 
 fn failed_test_result(error: String) -> SharedStorageTestResult {
@@ -793,38 +832,72 @@ async fn run_loopback_server(
                                 s.status = OAuthSessionStatus::Failed(outcome_message.clone());
                             }
                         } else {
-                            let now = chrono::Utc::now().timestamp();
-                            let credentials = StorageCredential::OAuth2 {
-                                access_token: token.access_token.clone(),
-                                refresh_token,
-                                expires_at: now + token.expires_in.unwrap_or(3600),
-                            };
-
-                            get_profile_manager()
-                                .store_oauth_session_credentials(
-                                    &context,
-                                    &session_id,
-                                    &credentials,
+                            let onedrive_metadata = if provider
+                                == StorageProvider::MicrosoftOneDrive
+                            {
+                                match crate::services::shared_storage::oauth_flow::discover_onedrive_drive(
+                                    &token.access_token,
                                 )
                                 .await
-                                .map_err(|e| format!("Persist OAuth session credentials: {e}"))?;
+                                {
+                                    Ok((drive_id, drive_type)) => {
+                                        let mut sessions = get_oauth_sessions().write().await;
+                                        if let Some(session) = sessions.get_mut(&session_id) {
+                                            session.oauth_fields.insert("drive_id".into(), drive_id);
+                                            session.oauth_fields.insert("drive_type".into(), drive_type);
+                                        }
+                                        Ok(())
+                                    }
+                                    Err(error) => Err(error),
+                                }
+                            } else {
+                                Ok(())
+                            };
 
-                            let verify: Option<StorageCredential> = get_profile_manager()
-                                .retrieve_oauth_session_credentials(&context, &session_id)
-                                .await
-                                .map_err(|e| {
-                                    format!("Verify persisted OAuth session credentials: {e}")
-                                })?;
-                            tracing::info!(
-                                "OAuth tokens stored for session {session_id}, verified: {}",
-                                verify.is_some()
-                            );
-
-                            let mut sessions = get_oauth_sessions().write().await;
-                            if let Some(s) = sessions.get_mut(&session_id) {
-                                s.status = OAuthSessionStatus::Completed;
+                            if let Err(error) = &onedrive_metadata {
+                                outcome_message = error.clone();
+                                let mut sessions = get_oauth_sessions().write().await;
+                                if let Some(session) = sessions.get_mut(&session_id) {
+                                    session.status = OAuthSessionStatus::Failed(error.clone());
+                                }
                             }
-                            outcome_ok = true;
+
+                            if onedrive_metadata.is_ok() {
+                                let now = chrono::Utc::now().timestamp();
+                                let credentials = StorageCredential::OAuth2 {
+                                    access_token: token.access_token.clone(),
+                                    refresh_token,
+                                    expires_at: now + token.expires_in.unwrap_or(3600),
+                                };
+
+                                get_profile_manager()
+                                    .store_oauth_session_credentials(
+                                        &context,
+                                        &session_id,
+                                        &credentials,
+                                    )
+                                    .await
+                                    .map_err(|e| {
+                                        format!("Persist OAuth session credentials: {e}")
+                                    })?;
+
+                                let verify: Option<StorageCredential> = get_profile_manager()
+                                    .retrieve_oauth_session_credentials(&context, &session_id)
+                                    .await
+                                    .map_err(|e| {
+                                        format!("Verify persisted OAuth session credentials: {e}")
+                                    })?;
+                                tracing::info!(
+                                    "OAuth tokens stored for session {session_id}, verified: {}",
+                                    verify.is_some()
+                                );
+
+                                let mut sessions = get_oauth_sessions().write().await;
+                                if let Some(s) = sessions.get_mut(&session_id) {
+                                    s.status = OAuthSessionStatus::Completed;
+                                }
+                                outcome_ok = true;
+                            }
                         }
                     }
                     Err(e) => {

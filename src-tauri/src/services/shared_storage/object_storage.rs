@@ -75,6 +75,14 @@ impl StorageProvider {
                         help_text: None,
                     },
                     ProviderField {
+                        key: "session_token".to_string(),
+                        label: "Session Token".to_string(),
+                        field_type: ProviderFieldType::Password,
+                        required: false,
+                        placeholder: None,
+                        help_text: Some("Only required for temporary AWS credentials".to_string()),
+                    },
+                    ProviderField {
                         key: "region".to_string(),
                         label: "Region".to_string(),
                         field_type: ProviderFieldType::Select {
@@ -193,39 +201,14 @@ impl StorageProvider {
                 category: self.category(),
                 is_oauth: self.is_oauth(),
                 description: "Microsoft OneDrive for your application backups".to_string(),
-                fields: vec![
-                    ProviderField {
-                        key: "drive_type".to_string(),
-                        label: "Drive Type".to_string(),
-                        field_type: ProviderFieldType::Select {
-                            options: vec![
-                                ProviderSelectOption {
-                                    value: "personal".to_string(),
-                                    label: "Personal OneDrive".to_string(),
-                                },
-                                ProviderSelectOption {
-                                    value: "business".to_string(),
-                                    label: "OneDrive for Business".to_string(),
-                                },
-                                ProviderSelectOption {
-                                    value: "sharepoint".to_string(),
-                                    label: "SharePoint Document Library".to_string(),
-                                },
-                            ],
-                        },
-                        required: true,
-                        placeholder: None,
-                        help_text: None,
-                    },
-                    ProviderField {
-                        key: "folder".to_string(),
-                        label: "Folder Name".to_string(),
-                        field_type: ProviderFieldType::Text,
-                        required: false,
-                        placeholder: Some("Noland Shared Storage".to_string()),
-                        help_text: None,
-                    },
-                ],
+                fields: vec![ProviderField {
+                    key: "folder".to_string(),
+                    label: "Folder Name".to_string(),
+                    field_type: ProviderFieldType::Text,
+                    required: false,
+                    placeholder: Some("Noland Shared Storage".to_string()),
+                    help_text: None,
+                }],
             },
             Self::Dropbox => ProviderDefinition {
                 provider: self.clone(),
@@ -265,6 +248,14 @@ impl StorageProvider {
                         required: true,
                         placeholder: None,
                         help_text: None,
+                    },
+                    ProviderField {
+                        key: "session_token".to_string(),
+                        label: "Session Token".to_string(),
+                        field_type: ProviderFieldType::Password,
+                        required: false,
+                        placeholder: None,
+                        help_text: Some("Optional temporary S3 credential token".to_string()),
                     },
                     ProviderField {
                         key: "region".to_string(),
@@ -415,6 +406,14 @@ impl StorageProvider {
                         help_text: None,
                     },
                     ProviderField {
+                        key: "session_token".to_string(),
+                        label: "Session Token".to_string(),
+                        field_type: ProviderFieldType::Password,
+                        required: false,
+                        placeholder: None,
+                        help_text: Some("Optional temporary S3 credential token".to_string()),
+                    },
+                    ProviderField {
                         key: "region".to_string(),
                         label: "Region".to_string(),
                         field_type: ProviderFieldType::Text,
@@ -557,11 +556,29 @@ impl StorageProvider {
                     },
                     ProviderField {
                         key: "password".to_string(),
-                        label: "Password (or leave empty for key auth)".to_string(),
+                        label: "Password".to_string(),
                         field_type: ProviderFieldType::Password,
                         required: false,
                         placeholder: None,
-                        help_text: Some("Leave empty to use SSH key authentication".to_string()),
+                        help_text: Some(
+                            "Provide a password or paste a PEM private key below".to_string(),
+                        ),
+                    },
+                    ProviderField {
+                        key: "private_key".to_string(),
+                        label: "PEM Private Key".to_string(),
+                        field_type: ProviderFieldType::Password,
+                        required: false,
+                        placeholder: Some("-----BEGIN ... PRIVATE KEY-----".to_string()),
+                        help_text: Some("Used when password is empty".to_string()),
+                    },
+                    ProviderField {
+                        key: "passphrase".to_string(),
+                        label: "Private Key Passphrase".to_string(),
+                        field_type: ProviderFieldType::Password,
+                        required: false,
+                        placeholder: None,
+                        help_text: None,
                     },
                     ProviderField {
                         key: "remote_path".to_string(),
@@ -572,12 +589,14 @@ impl StorageProvider {
                         help_text: None,
                     },
                     ProviderField {
-                        key: "host_key".to_string(),
-                        label: "Host Key Fingerprint".to_string(),
+                        key: "host_keys".to_string(),
+                        label: "Pinned Host Public Key".to_string(),
                         field_type: ProviderFieldType::Text,
                         required: false,
-                        placeholder: Some("SHA256:...".to_string()),
-                        help_text: Some("Pin the server host key for security".to_string()),
+                        placeholder: Some("ssh-ed25519 AAAAC3...".to_string()),
+                        help_text: Some(
+                            "Complete public key, not only its SHA256 fingerprint".to_string(),
+                        ),
                     },
                 ],
             },
@@ -639,6 +658,14 @@ impl StorageProvider {
                             "Use an app-specific password, not your main account password"
                                 .to_string(),
                         ),
+                    },
+                    ProviderField {
+                        key: "remote_path".to_string(),
+                        label: "Remote Path".to_string(),
+                        field_type: ProviderFieldType::Text,
+                        required: false,
+                        placeholder: Some("Noland Shared Storage".to_string()),
+                        help_text: Some("Folder below the WebDAV URL".to_string()),
                     },
                 ],
             },

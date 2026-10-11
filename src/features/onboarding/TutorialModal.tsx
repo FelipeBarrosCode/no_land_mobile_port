@@ -1,8 +1,6 @@
 import { Button } from "../../components/ui/Button";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import type { TutorialStep } from "./tutorialSteps";
-import { AIPromptHelper } from "../../components/ui/AIPromptHelper";
-import { APP_PROMPTS } from "../../prompts/appPrompts";
 import { useLocalization } from "../../lib/i18n";
 
 interface Props {
@@ -41,11 +39,6 @@ export function TutorialModal({
               <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
                 {t(step.eyebrow)}
               </p>
-              <AIPromptHelper
-                topic={t("tutorial.topic", { title: t(step.title) })}
-                promptText={APP_PROMPTS[`helpStep${stepIndex + 1}` as keyof typeof APP_PROMPTS] || ""}
-                variant="icon"
-              />
             </div>
             <h2 className="pixel-heading mt-2 font-display text-lg text-white md:text-xl">
               {t(step.title)}
