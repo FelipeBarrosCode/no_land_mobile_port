@@ -1,6 +1,7 @@
 import { cpSync, existsSync, mkdirSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { stageIOSRemoteAgents } from "./ios-remote-agents.mjs";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const apple = `${root}/src-tauri/apple`;
@@ -8,6 +9,7 @@ const generated = `${root}/src-tauri/gen/apple`;
 if (!existsSync(`${generated}/project.yml`)) {
   throw new Error("Run `tauri ios init` before applying the maintained Apple project sources.");
 }
+stageIOSRemoteAgents(root);
 mkdirSync(`${generated}/Sources`, { recursive: true });
 cpSync(`${apple}/Sources`, `${generated}/Sources`, { recursive: true, force: true });
 cpSync(`${apple}/project.yml`, `${generated}/project.yml`, { force: true });

@@ -44,6 +44,24 @@ dynamically linked GStreamer and libelf dependencies.
 
 ## Measurement and remaining work
 
+### Local iOS builds
+
+Linux executables are CI artifacts, not committed binaries. Before configuring
+or building the iOS project, download both remote CPU bundles from a mobile CI
+run with matching agent sources:
+
+```sh
+npm run prepare:ios:agents -- --run <GitHub-run-id>
+npm run tauri:ios:build
+```
+
+The preparation command requires authenticated `gh`. It rejects artifacts built
+from different agent sources. iOS CI builds/downloads both architectures, project
+configuration stages them under `assets/_up_/state-agent/prebuilt`, and the App
+Store workflow checks the actual extracted IPA before upload. Missing/corrupt
+agents fail the build instead of silently compiling them on the remote machine.
+Microphone binaries are not part of the mobile bundle.
+
 Structured `provisioning stage started/finished` logs report durations for the
 overall flow, package transactions, state/lifecycle/network/microphone agents,
 and display/network lanes. RemoteExec also records each SSH command's duration.
