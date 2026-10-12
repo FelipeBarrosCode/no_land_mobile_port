@@ -176,6 +176,7 @@ jobs:
           APP="$(find "$PAYLOAD/Payload" -maxdepth 1 -type d -name '*.app' -print -quit)"
           EXTENSION="$APP/PlugIns/NolandPacketTunnel.appex"
           test -d "$APP" && test -d "$EXTENSION"
+          node scripts/ios-remote-agents.mjs --verify-app "$APP"
           test -f "$APP/PrivacyInfo.xcprivacy"
           test -f "$APP/embedded.mobileprovision"
           test -f "$EXTENSION/embedded.mobileprovision"
