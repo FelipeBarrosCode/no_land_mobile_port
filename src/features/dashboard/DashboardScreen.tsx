@@ -5,6 +5,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
 import type { BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { Button } from "../../components/ui/Button";
+import { VastReferralDisclosure } from "../../components/VastReferralDisclosure";
 import { Card } from "../../components/ui/Card";
 import { HudBar } from "../../components/ui/HudBar";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
@@ -1070,6 +1071,7 @@ export function DashboardScreen({
             <p className="text-[1.15rem] leading-snug text-[#bfd3ee]">
               {translate("generated.2b3c522de8b33dc6")}
             </p>
+            <VastReferralDisclosure className="mt-3" />
 
             <div className="mt-4 space-y-3">
               <Button

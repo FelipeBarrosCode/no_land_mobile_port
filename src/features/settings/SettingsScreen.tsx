@@ -4,6 +4,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { errorMessage } from "../../lib/errorMessage";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
 import { Button } from "../../components/ui/Button";
+import { VastReferralDisclosure } from "../../components/VastReferralDisclosure";
 import { Card } from "../../components/ui/Card";
 import { InputField } from "../../components/ui/InputField";
 import { MobileMenuButton, MobileSideMenu } from "../../components/ui/MobileSideMenu";
@@ -564,6 +565,7 @@ export function SettingsScreen({
             {translate("generated.b323fecaa6164d1f")}
           </Button>
         </div>
+        <VastReferralDisclosure className="mt-3" />
         <div className="mt-3 space-y-1 text-[1rem] text-[#8fb4d4]">
           <p>{translate("generated.35c5f3a7ba14f7f0")}</p>
           <p>{translate("generated.f4bd0220e25db120")}</p>
