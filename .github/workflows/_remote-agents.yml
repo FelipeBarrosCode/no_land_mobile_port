@@ -1,0 +1,41 @@
+name: Remote provisioning agents
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: remote-agents-${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            arch: x86_64
+          - os: ubuntu-22.04-arm
+            arch: aarch64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87
+      - uses: Swatinem/rust-cache@f13886b937689c021905a6b90929199931d60db1
+        with:
+          workspaces: |
+            state-agent
+            network-agent
+      - name: Install agent build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libelf-dev zlib1g-dev pkg-config
+      - name: Build and verify native remote agents (no microphone)
+        run: bash scripts/ci/build-remote-agents.sh
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: remote-agents-${{ matrix.arch }}
+          path: state-agent/prebuilt/${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 2

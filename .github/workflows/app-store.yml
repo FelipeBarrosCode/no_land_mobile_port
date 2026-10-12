@@ -23,7 +23,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  remote-agents:
+    uses: ./.github/workflows/_remote-agents.yml
+
   archive:
+    needs: remote-agents
     runs-on: macos-26
     timeout-minutes: 120
     environment: app-store
@@ -55,6 +59,16 @@ jobs:
         run: brew install xcodegen
       - name: Install JavaScript dependencies
         run: npm ci
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: remote-agents-x86_64
+          path: state-agent/prebuilt/x86_64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: remote-agents-aarch64
+          path: state-agent/prebuilt/aarch64
+      - name: Verify both remote CPU architecture bundles
+        run: node --input-type=module -e "import { verifyRemoteAgentArtifacts } from './scripts/remote-agent-artifacts.mjs'; verifyRemoteAgentArtifacts('state-agent');"
       - name: Set and validate release version
         id: release
         shell: bash

@@ -11,6 +11,11 @@ if (!existsSync(`${generated}/project.yml`)) {
 mkdirSync(`${generated}/Sources`, { recursive: true });
 cpSync(`${apple}/Sources`, `${generated}/Sources`, { recursive: true, force: true });
 cpSync(`${apple}/project.yml`, `${generated}/project.yml`, { force: true });
+// Restore the maintained iOS icons after init and before every native build.
+cpSync(`${root}/src-tauri/icons/ios`, `${generated}/Assets.xcassets/AppIcon.appiconset`, {
+  recursive: true,
+  force: true,
+});
 const xcodegen = spawnSync("xcodegen", ["generate", "--spec", `${generated}/project.yml`, "--project", generated], {
   cwd: generated,
   stdio: "inherit",

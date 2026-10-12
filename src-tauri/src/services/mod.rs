@@ -30,6 +30,7 @@ pub mod os_detection;
 mod package_manager;
 
 pub mod post_wireguard_setup;
+mod provisioning;
 pub mod reboot_helper;
 pub mod remote_display;
 #[cfg_attr(target_os = "ios", path = "remote_exec_ios.rs")]
