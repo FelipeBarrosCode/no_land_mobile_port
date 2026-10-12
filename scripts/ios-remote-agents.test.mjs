@@ -57,3 +57,12 @@ test('rejects an IPA whose resources omit or corrupt a Linux agent', (t) => {
   rmSync(binary);
   assert.throws(() => verifyIOSAppRemoteAgents(app), /ENOENT/);
 });
+
+test('App Store builds run on main merges as well as iOS tags and manual dispatch', () => {
+  const workflow = readFileSync(new URL('../.github/workflows/app-store.yml', import.meta.url), 'utf8');
+  const triggers = workflow.split('\npermissions:')[0];
+  assert.match(triggers, /push:\s*\n\s+branches: \[main\]/);
+  assert.match(triggers, /tags:\s*\n\s+- "ios-v\*"/);
+  assert.match(triggers, /workflow_dispatch:/);
+  assert.ok(workflow.includes("github.event_name == 'push' || inputs.upload"));
+});
