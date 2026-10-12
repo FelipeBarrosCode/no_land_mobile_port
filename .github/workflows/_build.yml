@@ -22,7 +22,11 @@ env:
   MACOSX_DEPLOYMENT_TARGET: "12.0"
 
 jobs:
+  remote-agents:
+    uses: ./.github/workflows/_remote-agents.yml
+
   build-unix:
+    needs: remote-agents
     name: build-${{ matrix.platform }}-${{ matrix.arch }}
     environment: Secrets
     strategy:
@@ -123,6 +127,15 @@ jobs:
           node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
           node scripts/set-release-version.mjs "${{ inputs.version }}"
 
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: remote-agents-x86_64
+          path: state-agent/prebuilt/x86_64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: remote-agents-aarch64
+          path: state-agent/prebuilt/aarch64
+
       - name: Build signed/notarized Tauri application
         shell: bash
         timeout-minutes: 60
@@ -209,6 +222,7 @@ jobs:
           rm -rf "src-tauri/target/${{ matrix.target }}/release/bundle"
 
   build-windows:
+    needs: remote-agents
     name: build-windows-${{ matrix.arch }}
     environment: Secrets
     permissions:
@@ -245,6 +259,15 @@ jobs:
           npm ci
           node scripts/stage-ci-managed-tools.mjs --target "${{ matrix.target }}"
           node scripts/set-release-version.mjs "${{ inputs.version }}"
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: remote-agents-x86_64
+          path: state-agent/prebuilt/x86_64
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: remote-agents-aarch64
+          path: state-agent/prebuilt/aarch64
 
       - name: Require Artifact Signing credentials
         shell: pwsh
