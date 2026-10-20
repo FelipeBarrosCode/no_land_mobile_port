@@ -14,7 +14,7 @@ on:
         default: true
 
 permissions:
-  contents: read
+  contents: write
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -83,9 +83,15 @@ jobs:
           build_number=$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
           npm run set:ios:build-number -- "$build_number"
           npm run check:ios:release
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            release_tag="$GITHUB_REF_NAME"
+          else
+            release_tag="ios-v${version}-build.${build_number}"
+          fi
           {
             echo "version=$version"
             echo "build_number=$build_number"
+            echo "release_tag=$release_tag"
           } >> "$GITHUB_OUTPUT"
       - name: Require App Store secrets
         env:
@@ -191,12 +197,27 @@ jobs:
           codesign -d --entitlements :- "$EXTENSION" > "$RUNNER_TEMP/tunnel-entitlements.plist"
           /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.networking.networkextension:0' "$RUNNER_TEMP/app-entitlements.plist" | grep -qx 'packet-tunnel-provider'
           /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.networking.networkextension:0' "$RUNNER_TEMP/tunnel-entitlements.plist" | grep -qx 'packet-tunnel-provider'
+          mkdir -p release-assets
+          release_ipa="release-assets/noland-connect-ios-${{ steps.release.outputs.version }}-${{ steps.release.outputs.build_number }}.ipa"
+          cp "$IPA" "$release_ipa"
+          shasum -a 256 "$release_ipa" > release-assets/SHA256SUMS
+          echo "release_path=$release_ipa" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
           name: noland-connect-ios-${{ steps.release.outputs.version }}-${{ steps.release.outputs.build_number }}
-          path: ${{ steps.ipa.outputs.path }}
+          path: release-assets
           if-no-files-found: error
           retention-days: 14
+      - name: Publish versioned iOS GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.release_tag }}
+          name: No Land iOS ${{ steps.release.outputs.version }} (${{ steps.release.outputs.build_number }})
+          target_commitish: ${{ github.sha }}
+          prerelease: ${{ github.ref_type != 'tag' }}
+          generate_release_notes: true
+          make_latest: ${{ github.ref_type == 'tag' }}
+          files: release-assets/*
       - name: Upload to App Store Connect
         if: ${{ github.event_name == 'push' || inputs.upload }}
         env:
