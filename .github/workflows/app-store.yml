@@ -169,7 +169,7 @@ jobs:
             -archivePath "$ARCHIVE" \
             -exportPath "$EXPORT_DIR" \
             -exportOptionsPlist src-tauri/apple/ExportOptions-AppStore.plist
-      - name: Locate and verify signed IPA
+      - name: Verify signed IPA and prepare unsigned GitHub artifact
         id: ipa
         run: |
           set -euo pipefail
@@ -197,18 +197,36 @@ jobs:
           codesign -d --entitlements :- "$EXTENSION" > "$RUNNER_TEMP/tunnel-entitlements.plist"
           /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.networking.networkextension:0' "$RUNNER_TEMP/app-entitlements.plist" | grep -qx 'packet-tunnel-provider'
           /usr/libexec/PlistBuddy -c 'Print :com.apple.developer.networking.networkextension:0' "$RUNNER_TEMP/tunnel-entitlements.plist" | grep -qx 'packet-tunnel-provider'
+          # Keep the original signed IPA at steps.ipa.outputs.path for App Store Connect.
+          # GitHub Releases receive a separate package with all signatures and profiles removed.
+          while IFS= read -r -d '' code_object; do
+            if codesign -d "$code_object" >/dev/null 2>&1; then
+              codesign --remove-signature "$code_object"
+            fi
+          done < <(find "$APP" -depth \( -type d \( -name '*.appex' -o -name '*.framework' \) -o -type f -name '*.dylib' \) -print0)
+          codesign --remove-signature "$APP"
+          find "$PAYLOAD/Payload" -type d -name _CodeSignature -prune -exec rm -rf {} +
+          find "$PAYLOAD/Payload" -type f \( -name embedded.mobileprovision -o -name CodeResources \) -delete
+          if codesign --verify --deep --strict "$APP" >/dev/null 2>&1; then
+            echo "Unsigned GitHub artifact still has a valid code signature" >&2
+            exit 1
+          fi
+          test ! -e "$APP/embedded.mobileprovision"
+          test ! -e "$EXTENSION/embedded.mobileprovision"
+
           mkdir -p release-assets
-          release_ipa="release-assets/noland-connect-ios-${{ steps.release.outputs.version }}-${{ steps.release.outputs.build_number }}.ipa"
-          cp "$IPA" "$release_ipa"
+          release_ipa="release-assets/noland-connect-ios-${{ steps.release.outputs.version }}-${{ steps.release.outputs.build_number }}-unsigned.ipa"
+          ditto -c -k --sequesterRsrc --keepParent "$PAYLOAD/Payload" "$release_ipa"
+          unzip -t "$release_ipa" >/dev/null
           shasum -a 256 "$release_ipa" > release-assets/SHA256SUMS
           echo "release_path=$release_ipa" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: noland-connect-ios-${{ steps.release.outputs.version }}-${{ steps.release.outputs.build_number }}
+          name: noland-connect-ios-${{ steps.release.outputs.version }}-${{ steps.release.outputs.build_number }}-unsigned
           path: release-assets
           if-no-files-found: error
           retention-days: 14
-      - name: Publish versioned iOS GitHub release
+      - name: Publish unsigned iOS GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.release.outputs.release_tag }}
