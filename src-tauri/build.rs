@@ -210,7 +210,10 @@ fn main() {
         "noland-moonlight/src/noland_microphone_ios.m",
         "noland-moonlight/src/noland_input_ios.c",
     ] {
-        println!("cargo:rerun-if-changed={}", native_root.join(source).display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            native_root.join(source).display()
+        );
     }
 
     println!(
@@ -303,8 +306,14 @@ fn main() {
     );
     println!("cargo:rustc-link-search=native={}", enet_lib_dir.display());
     if is_ios {
-        println!("cargo:rustc-link-search=native={}", ios_opus_lib_dir.display());
-        println!("cargo:rustc-link-search=native={}", ios_mbedtls_lib_dir.display());
+        println!(
+            "cargo:rustc-link-search=native={}",
+            ios_opus_lib_dir.display()
+        );
+        println!(
+            "cargo:rustc-link-search=native={}",
+            ios_mbedtls_lib_dir.display()
+        );
     }
     if let Some(config) = windows_config {
         println!(
