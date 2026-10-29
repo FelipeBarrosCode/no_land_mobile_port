@@ -91,6 +91,7 @@ jobs:
 
   build:
     name: signed-six-platform-release-rehearsal
+    if: github.repository == 'FelipeBarrosCode/no_land'
     needs: [tests, version]
     permissions:
       contents: read
