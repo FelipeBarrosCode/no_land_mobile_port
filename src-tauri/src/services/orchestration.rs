@@ -643,6 +643,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         "-e PASS": env_pass
     });
 
+    let feedback_intent = context.feedback.prepare_rental(&offer);
     let mut instance = match instance_manager
         .create_instance(
             &vast,
@@ -650,6 +651,11 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             &initial_state.server_preferences.template_hash,
             initial_state.server_preferences.storage_gb,
             Some(env_vars),
+            |rental| {
+                if let Some(intent) = feedback_intent.as_deref() {
+                    context.feedback.rental_accepted(intent, rental);
+                }
+            },
         )
         .await
     {
@@ -693,6 +699,9 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
                     context
                         .update_state(|state| {
                             state.instance.instance_id = Some(existing.id);
+                            state.instance.machine_id = existing.machine_id.clone();
+                            state.instance.feedback_session_id = None;
+                            state.instance.feedback_journal_ref = None;
                             state.instance.status = existing.status.clone();
                             state.instance.ssh_host = existing.ssh_host.clone();
                             state.instance.ssh_port = existing.ssh_port;
@@ -723,6 +732,12 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
             return Err(error);
         }
     };
+    if let Some(intent) = feedback_intent.as_deref() {
+        context
+            .feedback
+            .rental_confirmed(&context, intent, instance.id, instance.machine_id.clone())
+            .await;
+    }
     ensure_not_cancelled(&context)?;
 
     emit_transition(
@@ -741,6 +756,13 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
     context
         .update_state(|state| {
             state.instance.instance_id = Some(instance.id);
+            state.instance.machine_id = instance
+                .machine_id
+                .clone()
+                .or_else(|| offer.machine_id.clone());
+            let reference = context.feedback.rental_reference(instance.id);
+            state.instance.feedback_session_id = reference.as_ref().map(|r| r.0.clone());
+            state.instance.feedback_journal_ref = reference.map(|r| r.1);
             state.instance.offer_id = Some(offer.id);
             state.instance.status = instance.status.clone();
             state.instance.ssh_host = instance.ssh_host.clone();
@@ -1661,6 +1683,11 @@ async fn run_existing_instance_orchestration(
 
     context
         .update_state(|state| {
+            if state.instance.instance_id != Some(instance_id) {
+                state.instance.machine_id = None;
+                state.instance.feedback_session_id = None;
+                state.instance.feedback_journal_ref = None;
+            }
             state.instance.instance_id = Some(instance_id);
             state.last_error = None;
         })
@@ -1880,6 +1907,10 @@ async fn run_existing_instance_orchestration(
     context
         .update_state(|state| {
             state.instance.instance_id = Some(instance.id);
+            state.instance.machine_id = instance
+                .machine_id
+                .clone()
+                .or_else(|| state.instance.machine_id.clone());
             state.instance.offer_id = state
                 .instance
                 .offer_id
@@ -3416,9 +3447,18 @@ async fn verify_instance_reserved_in_account(
             let ssh_host = instance.ssh_host.clone();
             let ssh_port = instance.ssh_port;
             let ssh_command = instance.ssh_command.clone();
+            let machine_id = instance.machine_id.clone();
             context
                 .update_state(move |state| {
+                    if state.instance.instance_id != Some(instance_id) {
+                        state.instance.machine_id = None;
+                        state.instance.feedback_session_id = None;
+                        state.instance.feedback_journal_ref = None;
+                    }
                     state.instance.instance_id = Some(instance_id);
+                    state.instance.machine_id = machine_id
+                        .clone()
+                        .or_else(|| state.instance.machine_id.clone());
                     state.instance.offer_id = offer_id.or(state.instance.offer_id);
                     state.instance.status = status.clone();
                     state.instance.ssh_host = ssh_host.clone();
@@ -3720,6 +3760,10 @@ async fn hydrate_state_from_server_record(
     context
         .update_state(move |state| {
             state.instance.instance_id = Some(instance_id);
+            state.instance.machine_id = record.machine_id.clone();
+            let reference = context.feedback.rental_reference(instance_id);
+            state.instance.feedback_session_id = reference.as_ref().map(|r| r.0.clone());
+            state.instance.feedback_journal_ref = reference.map(|r| r.1);
             if include_instance_metadata {
                 state.instance.offer_id = offer_id.or(state.instance.offer_id);
                 if !status.is_empty() {
@@ -3870,6 +3914,16 @@ async fn ensure_server_record(
                     app_state.provisioned_servers.len() - 1
                 });
             let record = &mut app_state.provisioned_servers[index];
+            if app_state.instance.instance_id == Some(instance_id) {
+                record.machine_id = app_state
+                    .instance
+                    .machine_id
+                    .clone()
+                    .or_else(|| record.machine_id.clone());
+            }
+            let reference = context.feedback.rental_reference(instance_id);
+            record.feedback_session_id = reference.as_ref().map(|r| r.0.clone());
+            record.feedback_journal_ref = reference.map(|r| r.1);
 
             record.offer_id = offer_id.or(record.offer_id);
             if !ssh_host.is_empty() {
@@ -3958,6 +4012,21 @@ pub(crate) async fn mark_server_step_completed(
         })
         .await?;
 
+    if matches!(step, ProvisionStepMarker::InstanceReady) {
+        context
+            .feedback
+            .milestone(instance_id, crate::models::feedback::Milestone::Ready);
+    }
+    if matches!(step, ProvisionStepMarker::PairingCompleted) {
+        context
+            .feedback
+            .milestone(instance_id, crate::models::feedback::Milestone::Paired);
+        if matches!(state, OrchestrationState::Ready) {
+            context
+                .feedback
+                .milestone(instance_id, crate::models::feedback::Milestone::Ready);
+        }
+    }
     Ok(())
 }
 

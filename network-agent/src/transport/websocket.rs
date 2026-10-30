@@ -50,6 +50,8 @@ enum ClientMessage {
         #[serde(rename = "sessionId")]
         session_id: Uuid,
         samples: Vec<MeasurementSample>,
+        #[serde(default, rename = "reportId")]
+        report_id: Option<String>,
     },
     GetState,
 }
@@ -71,6 +73,7 @@ struct StatsUpdate {
     generated_at_ms: u64,
     runtime_seconds: u64,
     metrics: MetricsSnapshot,
+    measurement_evidence: Option<noland_network_contracts::feedback::MeasurementEvidence>,
     classification: Classification,
     state: StateView,
 }
@@ -234,7 +237,7 @@ async fn handle_connection(
                         let evaluation = evaluate(&shared, session_id, &token, &thresholds).await?;
                         send_evaluation(&mut websocket, evaluation).await?;
                     }
-                    ClientMessage::MeasurementReport { session_id: report_session, samples } => {
+                    ClientMessage::MeasurementReport { session_id: report_session, samples, report_id } => {
                         if report_session != session_id {
                             send_error(&mut websocket, "WRONG_SESSION", "report sessionId does not match authenticated session").await?;
                             continue;
@@ -257,7 +260,17 @@ async fn handle_connection(
                                 send_error(&mut websocket, "SESSION_REPLACED", "session is no longer registered with this connection").await?;
                                 return Ok(());
                             }
-                            session.window.extend(samples, Instant::now());
+                            let measured_at = Instant::now();
+                            if let Some(report_id) = report_id.filter(|id| Uuid::parse_str(id).is_ok()) {
+                                if let Some(highest) = samples.iter().map(|s| s.sequence).max() {
+                                    let received = samples.iter().filter(|s| !s.lost && s.rtt_ms.is_some()).map(|s| s.sequence).max();
+                                    if session.feedback_evidence.as_ref().is_none_or(|(_, previous, _, _)| highest > *previous) {
+                                        let previous_received = session.feedback_evidence.as_ref().and_then(|(_, _, r, _)| *r);
+                                        session.feedback_evidence = Some((report_id, highest, received.max(previous_received), measured_at));
+                                    }
+                                }
+                            }
+                            session.window.extend(samples, measured_at);
                         }
                         let evaluation = evaluate(&shared, session_id, &token, &thresholds).await?;
                         send_evaluation(&mut websocket, evaluation).await?;
@@ -298,6 +311,24 @@ async fn evaluate(
     session.window.prune(now);
     let runtime_seconds = session.runtime(now).as_secs();
     let metrics = snapshot(&session.window, now);
+    let measurement_evidence =
+        session
+            .feedback_evidence
+            .as_ref()
+            .map(|(report_id, highest, received, at)| {
+                noland_network_contracts::feedback::MeasurementEvidence {
+                    metric_version: noland_network_contracts::feedback::RTT_JITTER_METRIC_VERSION
+                        .into(),
+                    report_id: report_id.clone(),
+                    highest_sequence: *highest,
+                    highest_received_sequence: *received,
+                    received_rtts: metrics.last_60_seconds.received as u64,
+                    window_age_ms: session.window.first_sample_at().map_or(0, |first| {
+                        now.saturating_duration_since(first).as_millis() as u64
+                    }),
+                    sample_age_ms: now.saturating_duration_since(*at).as_millis() as u64,
+                }
+            });
     let classification = classify(&session.window, now, thresholds);
     let transition = session.state.evaluate(&classification, now);
     let state = StateView {
@@ -317,6 +348,7 @@ async fn evaluate(
             generated_at_ms,
             runtime_seconds,
             metrics,
+            measurement_evidence,
             classification,
             state,
         },
@@ -397,6 +429,56 @@ fn unix_time_ms() -> u64 {
 mod tests {
     use super::decode_token;
 
+    #[tokio::test]
+    async fn evidence_echoes_the_processed_batch_and_counts_received_rtts_not_sends() {
+        let shared = crate::shared_state(4, 20);
+        let id = uuid::Uuid::from_u128(1);
+        let token = [7; 32];
+        let at = std::time::Instant::now();
+        {
+            let mut registry = shared.lock().await;
+            registry.register(id, token, at);
+            let session = registry.get_mut(&id).unwrap();
+            session.window.extend(
+                vec![
+                    crate::telemetry::sample::MeasurementSample {
+                        sequence: 1,
+                        rtt_ms: Some(10.0),
+                        lost: false,
+                    },
+                    crate::telemetry::sample::MeasurementSample {
+                        sequence: 2,
+                        rtt_ms: None,
+                        lost: true,
+                    },
+                    crate::telemetry::sample::MeasurementSample {
+                        sequence: 3,
+                        rtt_ms: Some(20.0),
+                        lost: false,
+                    },
+                ],
+                at,
+            );
+            session.feedback_evidence = Some(("processed-batch".into(), 3, Some(3), at));
+        }
+        let result = super::evaluate(
+            &shared,
+            id,
+            &token,
+            &crate::classifier::thresholds::ClassifierThresholds::default(),
+        )
+        .await
+        .unwrap();
+        let evidence = result.stats.measurement_evidence.unwrap();
+        assert_eq!(evidence.report_id, "processed-batch");
+        assert_eq!(evidence.highest_sequence, 3);
+        assert_eq!(evidence.received_rtts, 2);
+        assert_eq!(result.stats.metrics.last_60_seconds.sent, 3);
+        assert_eq!(
+            evidence.metric_version,
+            noland_network_contracts::feedback::RTT_JITTER_METRIC_VERSION
+        );
+    }
     #[test]
     fn token_requires_exact_hex_length_and_accepts_uppercase() {
         assert_eq!(decode_token(&"AA".repeat(32)), Some([0xaa; 32]));

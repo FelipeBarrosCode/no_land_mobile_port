@@ -45,6 +45,7 @@ import { SharedStorageSyncModal } from "../shared-storage-manager/SharedStorageS
 import { LaunchLibraryModal } from "../launch-library/LaunchLibraryModal";
 import { InstanceTerminalModal } from "./InstanceTerminalModal";
 import { InstanceUploadModal } from "./InstanceUploadModal";
+import { FeedbackProgramModal } from "../feedback/FeedbackProgramModal";
 
 import { TutorialModal } from "../onboarding/TutorialModal";
 import { tutorialSteps } from "../onboarding/tutorialSteps";
@@ -231,6 +232,7 @@ export function DashboardScreen({
     "wireguard" | null
   >(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [feedbackProgramOpen, setFeedbackProgramOpen] = useState(false);
   const navigate = useNavigate();
   const blockingLabel = blockingAction?.label ?? null;
   const blockingDetail = blockingAction?.detail ?? null;
@@ -426,8 +428,9 @@ export function DashboardScreen({
   return (
     <main className="crt-surface min-h-dvh bg-hero-glow px-4 pb-8 pt-6 md:px-8">
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-8">
-        <header className="flex items-center justify-between gap-3">
-          <div>
+        <header className="flex flex-wrap items-center justify-between gap-3">
+          <div className="min-w-0">
+            <Button type="button" variant="ghost" className="mb-3 min-h-11" onClick={() => setFeedbackProgramOpen(true)}>Feedback program</Button>
             <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
               {translate("generated.939edfedc701440a")}
             </p>
@@ -478,6 +481,7 @@ export function DashboardScreen({
           onClose={() => setMobileMenuOpen(false)}
         >
           <div className="grid gap-3">
+            <Button type="button" variant="ghost" className="min-h-11" onClick={() => { setMobileMenuOpen(false); setFeedbackProgramOpen(true); }}>Feedback program</Button>
             <Button
               variant={systemHealth?.ok === false ? "danger" : "secondary"}
               onClick={() => { setMobileMenuOpen(false); void handleHealthClick(); }}
@@ -505,6 +509,8 @@ export function DashboardScreen({
             </div>
           </div>
         </MobileSideMenu>
+
+        {feedbackProgramOpen && <FeedbackProgramModal onClose={() => setFeedbackProgramOpen(false)} />}
 
         {showDashboardGuidance ? (
           <section className="grid gap-4 md:grid-cols-3">
@@ -933,7 +939,7 @@ export function DashboardScreen({
                 </div>
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
-                    {translate("generated.71d0acd465564246")}
+                    Vast reliability
                   </p>
                   <p>
                     {(appState.selectedOffer.reliability * 100).toFixed(1)}%
@@ -959,7 +965,7 @@ export function DashboardScreen({
             {appState.selectedOffer ? (
               <div className="mt-4 grid gap-2 md:grid-cols-3">
                 <HudBar
-                  label={translate("generated.71d0acd465564246")}
+                  label="Vast reliability"
                   value={appState.selectedOffer.reliability}
                   valueLabel={`${Math.round(appState.selectedOffer.reliability * 100)}%`}
                 />

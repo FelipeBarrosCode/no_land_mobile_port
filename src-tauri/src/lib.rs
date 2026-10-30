@@ -469,6 +469,7 @@ pub fn run() {
                 }
                 stream_network_context.set_stream_network_active(false);
             });
+            services::feedback::start(context.clone(), &moonlight_manager);
             let performance_overlay = moonlight_manager.performance_overlay.clone();
             app.manage(moonlight_manager);
             moonlight::platform::performance_overlay::start(app.handle().clone(), performance_overlay);
@@ -553,6 +554,7 @@ pub fn run() {
             let network_monitor = app.state::<network_monitor::NetworkMonitor>().inner().clone();
 
             tauri::async_runtime::spawn(async move {
+                mic_context.feedback.stream_stopped();
                 network_monitor.stop().await;
                 mic_context.set_stream_network_active(false);
                 let _ = runtime.stop().await;
@@ -577,6 +579,17 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_app_state,
+            feedback_program_status,
+            feedback_program_notices,
+            feedback_program_enroll,
+            feedback_program_consent,
+            feedback_program_delete,
+            feedback_machine_summaries,
+            feedback_machine_reviews,
+            feedback_review_report,
+            feedback_review_block_author,
+            feedback_review_eligibility,
+            feedback_stage_review,
             get_auto_shutdown_settings,
             get_instance_auto_shutdown_status,
             save_auto_shutdown_settings,

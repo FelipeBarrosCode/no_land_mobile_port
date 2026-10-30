@@ -1,0 +1,42 @@
+PART 3 OF 3 - GUIDELINE 4.7.4 AND SOFTWARE INDEX
+
+The complete response is too large to fit within the message character limit, so it needed to be broken down into three separate messages. This is Part 3 of 3. Please also review Parts 1 and 2.
+
+6. Guideline 4.7.4 - Index of non-embedded games or software
+
+No Land does not provide a remotely hosted game or software catalog. Therefore, there are currently no games distributed, licensed, or made available by No Land that can be included in such an index.
+
+Any applications or games displayed in the app's launch interface are discovered from software that the individual user has installed on their own rented computer. This list is different for every user and functions similarly to the application list on a remote desktop.
+
+No Land does not select, host, sell, license, or unlock those titles.
+
+Users must:
+
+- Obtain their games and applications independently.
+- Own or otherwise have permission to use them.
+- Sign in using their own third-party accounts.
+- Install them on the computer they rent and control.
+- Comply with the applicable developer, publisher, and platform terms.
+
+The following webpage is only a compatibility-search resource based on public Steam and ProtonDB information:
+
+https://no-land.net/games/
+
+It helps users determine whether a title may run on a remote Linux computer. It is not a catalog of games supplied or made available by No Land. A title appearing on this webpage does not provide the user with access to that title.
+
+Current index:
+
+Games or software supplied by No Land: None
+Developer: Not applicable
+URL: Not applicable
+
+We will include an updated statement or index in the App Review Notes of future submissions. If No Land later begins providing access to remotely hosted games or software, we will provide the title, developer, and URL as required by Guideline 4.7.4.
+
+Thank you for your review. We are happy to provide any additional technical information, screenshots, or testing instructions that may be required.
+
+The full source code for No Land is open source and can be found at:
+
+https://github.com/FelipeBarrosCode/no_land_mobile_port
+
+Best regards,
+No Land Development Team

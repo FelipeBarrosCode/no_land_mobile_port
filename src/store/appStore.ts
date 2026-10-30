@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { useFeedbackStore } from "../features/feedback/store";
 import { translate, translateSource } from "../lib/i18n";
 import {
   isPermissionGranted,
@@ -2500,7 +2501,7 @@ export const useAppStore = create<AppStore>((set, get) => {
 
 
     destroyInstance: async (instanceId) => {
-      await runInstanceTask(
+      const destroyed = await runInstanceTask(
         {
           key: "instance.destroy",
           label: translate("generated.0c9df74dc6eeab50"),
@@ -2519,9 +2520,13 @@ export const useAppStore = create<AppStore>((set, get) => {
                 : state.embeddedMoonlightStatus,
             activeMoonlightPairing: null,
           }));
+          useFeedbackStore.getState().invalidate();
+          void useFeedbackStore.getState().refreshStatus();
+          return true;
         },
-        undefined,
+        false,
       );
+      if (!destroyed) throw new Error("Instance destruction did not complete.");
     },
 
 

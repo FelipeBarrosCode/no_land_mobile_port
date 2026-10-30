@@ -24,6 +24,7 @@ impl InstanceManager {
         template_hash: &str,
         storage_gb: u32,
         env_vars: Option<serde_json::Value>,
+        on_accepted: impl FnOnce(u64),
     ) -> AppResult<VastInstance> {
         api.create_instance(
             offer_id,
@@ -31,6 +32,7 @@ impl InstanceManager {
             storage_gb,
             "Noland Connect Session",
             env_vars,
+            on_accepted,
         )
         .await
     }
