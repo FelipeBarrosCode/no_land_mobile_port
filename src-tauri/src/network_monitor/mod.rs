@@ -42,6 +42,8 @@ const MAX_REPORT_SAMPLES: usize = 100;
 pub struct NetworkMonitorSession {
     pub session_id: Uuid,
     pub target_host: String,
+    #[serde(skip)]
+    pub provider_instance_id: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -72,6 +74,7 @@ impl NetworkMonitor {
         &self,
         app: AppHandle,
         target_host: String,
+        provider_instance_id: Option<u64>,
     ) -> Result<NetworkMonitorSession, String> {
         let _lifecycle = self.lifecycle.lock().await;
         self.stop_current().await;
@@ -80,6 +83,7 @@ impl NetworkMonitor {
         let session = NetworkMonitorSession {
             session_id: Uuid::new_v4(),
             target_host,
+            provider_instance_id,
         };
         let token: [u8; 32] = rand::random();
         let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -164,9 +168,15 @@ async fn run_monitor(
     latest_stats: Arc<RwLock<Option<(Instant, Value)>>>,
     mut cancel: watch::Receiver<bool>,
 ) {
-    let reporter = Reporter::new(app, session.session_id, latest_stats);
+    let reporter = Reporter::new(
+        app,
+        session.session_id,
+        session.provider_instance_id,
+        latest_stats,
+    );
     let ws_url = websocket_url(&session.target_host);
     let mut fail_safe = FailSafeState::new(Instant::now());
+    let mut next_sequence = 0_u64;
 
     loop {
         if *cancel.borrow() {
@@ -232,6 +242,7 @@ async fn run_monitor(
             &reporter,
             &mut fail_safe,
             &mut cancel,
+            &mut next_sequence,
         )
         .await
         {
@@ -255,9 +266,9 @@ async fn run_connected(
     reporter: &Reporter,
     fail_safe: &mut FailSafeState,
     cancel: &mut watch::Receiver<bool>,
+    sequence: &mut u64,
 ) -> ConnectedResult {
     let (mut sink, mut stream) = websocket.split();
-    let mut sequence = 0_u64;
     let mut pending = BTreeMap::<u64, Instant>::new();
     let mut samples = VecDeque::<MeasurementSample>::new();
     let mut receive_buffer = [0_u8; PACKET_LEN];
@@ -285,8 +296,8 @@ async fn run_connected(
                     continue;
                 };
 
-                let current_sequence = sequence;
-                sequence = sequence.wrapping_add(1);
+                let current_sequence = *sequence;
+                *sequence = sequence.wrapping_add(1);
                 let packet = encode_probe(current_sequence, session.session_id, token);
                 let send_result = tokio::select! {
                     _ = cancelled(cancel) => return ConnectedResult::Cancelled,
@@ -354,9 +365,12 @@ async fn run_connected(
 
                 let count = samples.len().min(MAX_REPORT_SAMPLES);
                 let report_samples: Vec<_> = samples.drain(..count).collect();
+                let report_id = reporter.feedback_report_id();
+                let highest_sequence = report_samples.iter().map(|s| s.sequence).max().unwrap_or(0);
                 let report = match serde_json::to_string(&json!({
                     "type": "measurement_report",
                     "sessionId": session.session_id,
+                    "reportId": report_id,
                     "samples": report_samples
                 })) {
                     Ok(report) => report,
@@ -372,7 +386,7 @@ async fn run_connected(
                 if let Err(error) = send_result {
                     return ConnectedResult::Disconnected(format!("WebSocket send failed: {error}"));
                 }
-                reporter.measurements_reported().await;
+                reporter.measurements_reported(report_id.as_deref(), highest_sequence).await;
             }
             _ = health_tick.tick() => {
                 check_fail_safe(fail_safe, reporter, Instant::now());

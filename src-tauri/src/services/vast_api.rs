@@ -180,6 +180,7 @@ impl VastApiClient {
         storage_gb: u32,
         label: &str,
         env_vars: Option<serde_json::Value>,
+        on_accepted: impl FnOnce(u64),
     ) -> AppResult<VastInstance> {
         let url = format!(
             "{}/api/v0/asks/{offer_id}/",
@@ -226,6 +227,9 @@ impl VastApiClient {
                 )
             })?;
 
+        // Preserve the real rental identity even if the subsequent details request fails.
+        // The observer is local-only and cannot retry/create a provider operation.
+        on_accepted(contract_id);
         info!(
             "Vast create_instance accepted offer_id={} contract_id={}",
             offer_id, contract_id
@@ -481,7 +485,12 @@ impl VastApiClient {
             .await
             .map_err(|error| map_send_error("DELETE", &url, error))?;
 
-        let _ = parse_response(response, "DELETE", &url, started).await?;
+        let body = parse_response(response, "DELETE", &url, started).await?;
+        if body.get("success").and_then(Value::as_bool) != Some(true) {
+            return Err(AppError::Api(
+                "Vast did not confirm instance destruction".into(),
+            ));
+        }
         info!(
             "Vast destroy_instance instance_id={} succeeded",
             instance_id

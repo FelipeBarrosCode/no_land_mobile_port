@@ -35,6 +35,7 @@ where
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=NOLAND_FEEDBACK_API_URL");
     println!("cargo:rerun-if-env-changed=NOLAND_SKIP_APP_BUILD_RS");
     println!("cargo:rerun-if-env-changed=NOLAND_SKIP_NATIVE_BUILD");
 
@@ -54,6 +55,7 @@ fn main() {
             .compile("noland_ios_platform");
         println!("cargo:rustc-link-lib=framework=UIKit");
         println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=Security");
         println!("cargo:rustc-link-lib=z");
         // Swift bridge functions are resolved when Xcode links the final app.
         println!("cargo:rustc-link-arg-cdylib=-Wl,-undefined,dynamic_lookup");
@@ -210,7 +212,10 @@ fn main() {
         "noland-moonlight/src/noland_microphone_ios.m",
         "noland-moonlight/src/noland_input_ios.c",
     ] {
-        println!("cargo:rerun-if-changed={}", native_root.join(source).display());
+        println!(
+            "cargo:rerun-if-changed={}",
+            native_root.join(source).display()
+        );
     }
 
     println!(
@@ -303,8 +308,14 @@ fn main() {
     );
     println!("cargo:rustc-link-search=native={}", enet_lib_dir.display());
     if is_ios {
-        println!("cargo:rustc-link-search=native={}", ios_opus_lib_dir.display());
-        println!("cargo:rustc-link-search=native={}", ios_mbedtls_lib_dir.display());
+        println!(
+            "cargo:rustc-link-search=native={}",
+            ios_opus_lib_dir.display()
+        );
+        println!(
+            "cargo:rustc-link-search=native={}",
+            ios_mbedtls_lib_dir.display()
+        );
     }
     if let Some(config) = windows_config {
         println!(

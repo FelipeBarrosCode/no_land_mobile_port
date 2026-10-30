@@ -220,6 +220,9 @@ pub struct MoonlightRuntimeHandle {
     commands: mpsc::Sender<RuntimeCommand>,
     state: watch::Receiver<SessionState>,
     statistics: watch::Receiver<RuntimeStatistics>,
+    frame_evidence: watch::Receiver<Option<(String, u64, Instant)>>,
+    pending_frame_evidence:
+        std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<(String, u64, Instant)>>>,
     latest_event: watch::Receiver<Option<RuntimeEventMessage>>,
     events: broadcast::Sender<RuntimeEventMessage>,
 }
@@ -474,6 +477,18 @@ impl MoonlightRuntimeHandle {
 
     pub fn subscribe_state(&self) -> watch::Receiver<SessionState> {
         self.state.clone()
+    }
+
+    /// Evidence originates in nl_video_frame_processor, never NL_EVENT_CONNECTED.
+    pub fn subscribe_frame_evidence(&self) -> watch::Receiver<Option<(String, u64, Instant)>> {
+        self.frame_evidence.clone()
+    }
+    /// Retains first-frame evidence across watch-channel coalescing (e.g. frame then immediate stop).
+    pub fn take_received_frame_evidence(&self) -> Vec<(String, u64, Instant)> {
+        self.pending_frame_evidence
+            .lock()
+            .map(|mut q| q.drain(..).collect())
+            .unwrap_or_default()
     }
 
     pub fn subscribe_statistics(&self) -> watch::Receiver<RuntimeStatistics> {
@@ -1727,10 +1742,15 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
     });
     let (latest_event_tx, latest_event_rx) = watch::channel::<Option<RuntimeEventMessage>>(None);
     let (event_tx, _) = broadcast::channel::<RuntimeEventMessage>(128);
+    let (frame_tx, frame_rx) = watch::channel::<Option<(String, u64, Instant)>>(None);
+    let pending_frame_evidence =
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
     let handle = MoonlightRuntimeHandle {
         commands: command_tx.clone(),
         state: state_rx,
         statistics: stats_rx,
+        frame_evidence: frame_rx,
+        pending_frame_evidence: pending_frame_evidence.clone(),
         latest_event: latest_event_rx,
         events: event_tx.clone(),
     };
@@ -1756,6 +1776,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
         let mut active_request: Option<NativeStartRequest> = None;
         let mut desired_running = false;
         let mut active_generation = 0_u64;
+        let mut first_frame_generation = 0_u64;
         let mut unexpected_reconnect_attempted = false;
 
         let mut reconnect_in_flight: Option<ReconnectCause> = None;
@@ -1781,6 +1802,25 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                 continue;
                             }
 
+                            if desired_running && event.kind == native::nl_event_kind_NL_EVENT_VIDEO_FRAME
+                                && event.session_generation == active_generation {
+                                if let Some(request) = active_request.as_ref().filter(|r| r.session_generation == active_generation) {
+                                    let evidence = (request.host_id.clone(), active_generation, Instant::now());
+                                    if first_frame_generation != active_generation {
+                                        first_frame_generation = active_generation;
+                                        if let Ok(mut pending) = pending_frame_evidence.lock() {
+                                            pending.push_back(evidence.clone());
+                                            while pending.len() > 32 { pending.pop_front(); }
+                                        }
+                                    }
+                                    let _ = frame_tx.send(Some(evidence));
+                                }
+                            }
+                            if event.kind == native::nl_event_kind_NL_EVENT_STOPPED
+                                || event.kind == native::nl_event_kind_NL_EVENT_TERMINATED
+                                || event.kind == native::nl_event_kind_NL_EVENT_STAGE_FAILED {
+                                let _ = frame_tx.send(None);
+                            }
                             let connected = event.kind == native::nl_event_kind_NL_EVENT_CONNECTED;
                             let terminal = event.kind == native::nl_event_kind_NL_EVENT_STAGE_FAILED
                                 || event.kind == native::nl_event_kind_NL_EVENT_STOPPED
@@ -1876,6 +1916,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                     }
 
                     if terminal_cleanup_requested && !failure_reconnect_requested {
+                        let _ = frame_tx.send(None);
                         desired_running = false;
                         active_request = None;
                         packet_size_deferred = false;
@@ -1905,6 +1946,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                 > Duration::from_secs(10);
 
                         if should_stop_for_stall {
+                            let _ = frame_tx.send(None);
                             let payload = RuntimeEventMessage {
                                 kind: "error".to_string(),
                                 code: -4100,
@@ -1997,6 +2039,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                                 let controller =
                                     prepare_packet_size_controller(&app_data_dir, &mut request);
 
+                                let _ = frame_tx.send(None);
                                 state = preparing_state;
                                 active_generation = next_generation;
                                 request.session_generation = active_generation;
@@ -2074,6 +2117,7 @@ pub fn spawn_runtime_actor(app_data_dir: PathBuf) -> MoonlightRuntimeHandle {
                             let _ = response.send(result);
                         }
                         RuntimeCommand::Stop { response } => {
+                            let _ = frame_tx.send(None);
                             let result = (|| -> Result<(), MoonlightError> {
                                 desired_running = false;
                                 active_request = None;

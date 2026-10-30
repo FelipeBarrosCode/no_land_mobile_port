@@ -1,0 +1,44 @@
+PART 2 OF 3 - VAST.AI RELATIONSHIP AND NEVPNMANAGER
+
+The complete response is too large to fit within the message character limit, so it needed to be broken down into three separate messages. This is Part 2 of 3. Please also review Parts 1 and 3.
+
+4. Relationship with Vast.ai
+
+Vast.ai is the third-party infrastructure marketplace currently used by No Land to locate and provision GPU computers.
+
+No Land is an independent application. It is not owned, sponsored, endorsed by, or formally partnered with Vast.ai. We do not have a separate written partnership or custom commercial agreement with Vast.ai.
+
+The app uses Vast.ai's publicly available services and API under its standard terms and requirements. Users access Vast.ai through their own accounts and are responsible for the computing resources rented through those accounts.
+
+No Land acts as a client and orchestration interface. It helps users select, configure, and connect to a computer that they rent through Vast.ai.
+
+Relevant public information is available at:
+
+- Vast.ai: https://vast.ai/
+- Vast.ai documentation: https://docs.vast.ai/
+
+5. Use of NEVPNManager
+
+No Land uses NEVPNManager and NETunnelProviderManager to create and manage a WireGuard packet tunnel between the user's iPhone and their selected remote computer.
+
+The tunnel provides a stable and encrypted private connection for:
+
+- Remote desktop video and audio streaming.
+- Transmission of the user's input.
+- Pairing and connection management.
+- Connection health checks.
+- Management of the user's rented computer.
+
+The tunnel is limited to traffic required to communicate with the No Land remote computer. It is not a general-purpose VPN service.
+
+No Land does not use the tunnel to route or inspect the user's unrelated internet traffic, circumvent geographic restrictions, monitor traffic from other applications, or provide anonymous internet browsing.
+
+The user initiates the connection when connecting to their remote computer, and the iPhone presents the standard system VPN permission prompt. No Land manages the tunnel's installation, connection, reconnection, status, and removal.
+
+The WireGuard configuration is stored securely using the iPhone Keychain rather than as unprotected application data.
+
+The implementation of the iPhone app, its Network Extension, and the WireGuard tunnel management code can be reviewed in our public source-code repository:
+
+https://github.com/FelipeBarrosCode/no_land_mobile_port
+
+Please continue to Part 3 of 3.

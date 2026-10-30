@@ -118,6 +118,15 @@ impl InstanceLifecycleService {
         context: &AppContext,
         owned_instances: &[VastInstance],
     ) -> AppResult<()> {
+        context
+            .feedback
+            .reconcile_provider(context, owned_instances)
+            .await;
+        for instance in owned_instances {
+            context
+                .feedback
+                .verify_machine(instance.id, instance.machine_id.as_deref());
+        }
         let owned_instance_ids = owned_instances.iter().map(|instance| instance.id).collect();
         Self::remove_local_instances_missing_from_owned_set(context, &owned_instance_ids).await?;
 
@@ -136,6 +145,17 @@ impl InstanceLifecycleService {
                         });
 
                     let record = &mut state.provisioned_servers[index];
+                    if instance.machine_id.is_some() {
+                        record.machine_id = instance.machine_id.clone();
+                    }
+                    let reference = context.feedback.rental_reference(instance.id);
+                    record.feedback_session_id = reference.as_ref().map(|r| r.0.clone());
+                    record.feedback_journal_ref = reference.map(|r| r.1);
+                    if state.instance.instance_id == Some(instance.id) {
+                        state.instance.machine_id = record.machine_id.clone();
+                        state.instance.feedback_session_id = record.feedback_session_id.clone();
+                        state.instance.feedback_journal_ref = record.feedback_journal_ref.clone();
+                    }
                     record.offer_id = state.selected_offer.as_ref().and_then(|offer| {
                         (state.instance.instance_id == Some(instance.id)).then_some(offer.id)
                     });
@@ -187,6 +207,9 @@ impl InstanceLifecycleService {
         };
 
         for record in &removed_records {
+            // A successful list can establish absence, not when/how setup ended.
+            // Preserve a known success; unresolved rentals become incomplete, never a fabricated failure.
+            context.feedback.external_absence(record.instance_id);
             if record.wireguard_config_path.trim().is_empty() {
                 continue;
             }
@@ -376,6 +399,7 @@ impl InstanceLifecycleService {
 
     /// Destroy a provisioned instance. Runs backup first if available.
     pub async fn destroy_instance(context: &AppContext, instance_id: u64) -> AppResult<()> {
+        context.feedback.checkpoint();
         Self::acquire_lock(instance_id, "destroy").await?;
 
         let result = async {
@@ -418,6 +442,9 @@ impl InstanceLifecycleService {
             );
 
             vast.destroy_instance(instance_id).await?;
+            // Only the provider's successful deletion response finalizes the review/lifecycle.
+            context.feedback.milestone(instance_id, crate::models::feedback::Milestone::Destroyed);
+            super::feedback::FeedbackProgramService::kick(context.clone());
 
             if !wireguard_config_path.trim().is_empty() {
                 let config_path = Path::new(&wireguard_config_path);

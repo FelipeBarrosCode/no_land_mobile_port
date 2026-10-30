@@ -3,6 +3,10 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
+import { MachineFeedbackMetrics } from "../feedback/MachineFeedbackMetrics";
+import { MachineReviewsModal } from "../feedback/MachineReviewsModal";
+import { useMachineFeedback } from "../feedback/useMachineFeedback";
+import { feedbackOfferMachineId } from "../feedback/model";
 import type {
   OfferCandidate,
   OfferCountryAvailability,
@@ -131,9 +135,9 @@ function sortModeLabel(sortMode: SortMode): string {
     case "priceDesc":
       return translate("generated.62bb459519624447");
     case "reliabilityDesc":
-      return translate("generated.d846d24611604354");
+      return "Vast reliability: highest first";
     case "reliabilityAsc":
-      return translate("generated.4017ba60f523a84c");
+      return "Vast reliability: lowest first";
     case "recommended":
     default:
       return translate("generated.b72924fa4d04fdea");
@@ -197,6 +201,7 @@ export function ServerPickerModal({
   );
   const storageInputRef = useRef(storageInput);
   const [pendingOfferId, setPendingOfferId] = useState<number | null>(null);
+  const [reviewOffer, setReviewOffer] = useState<OfferCandidate | null>(null);
 
   const countryOptions = useMemo<CountryOption[]>(() => {
     if (availableCountries.length === 0) {
@@ -310,6 +315,8 @@ export function ServerPickerModal({
     sortMode,
   ]);
 
+  const feedback = useMachineFeedback(displayedOffers.map(feedbackOfferMachineId), open);
+
   const commitStorageInput = async () => {
     const parsed = Number(storageInputRef.current);
     if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -338,14 +345,14 @@ export function ServerPickerModal({
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape" && open) {
+      if (event.key === "Escape" && open && !reviewOffer) {
         onClose();
       }
     }
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [open, onClose]);
+  }, [open, onClose, reviewOffer]);
 
 
   if (!open) {
@@ -498,20 +505,20 @@ export function ServerPickerModal({
 
             <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                {translate("generated.2a0484303fb36b3f")}
+                Vast reliability sort
               </p>
               <div className="mt-3 grid gap-2">
                 <Button
                   variant={sortMode === "reliabilityDesc" ? "secondary" : "ghost"}
                   onClick={() => setSortMode("reliabilityDesc")}
                 >
-                  {translate("generated.b9a06d5c358c64d0")}
+                  Vast: highest first
                 </Button>
                 <Button
                   variant={sortMode === "reliabilityAsc" ? "secondary" : "ghost"}
                   onClick={() => setSortMode("reliabilityAsc")}
                 >
-                  {translate("generated.968ff3bc38b80a22")}
+                  Vast: lowest first
                 </Button>
               </div>
             </div>
@@ -584,7 +591,7 @@ export function ServerPickerModal({
 
             <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                {translate("generated.cba70479842bde05")}
+                Vast reliability filter (%)
               </p>
               {reliabilityRange.swapped && (
                 <p className="mt-1 text-[1rem] leading-none text-[#ffd78a]">
@@ -593,7 +600,7 @@ export function ServerPickerModal({
               )}
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <label className="text-[1.05rem] text-[#b4c8de]">
-                  {translate("generated.865dfae5104a1411")}
+                  Minimum Vast %
                   <input
                     type="number"
                     min={0}
@@ -606,7 +613,7 @@ export function ServerPickerModal({
                   />
                 </label>
                 <label className="text-[1.05rem] text-[#b4c8de]">
-                  {translate("generated.946a0aa6108ce0b2")}
+                  Maximum Vast %
                   <input
                     type="number"
                     min={0}
@@ -652,6 +659,8 @@ export function ServerPickerModal({
           </div>
         </details>
 
+        <p className="mb-3 text-base text-[#9ec4df]">Filtering, sorting, recommendations and automatic rental selection use Vast reliability, not community setup results. Enrichment never reorders offers.</p>
+        {feedback.enabled && feedback.unavailable && <p className="mb-3 text-base text-[#ffd78a]" role="status">Some community data is unavailable. Vast values and Rent remain usable. <button type="button" className="min-h-11 px-2 text-neon-cyan underline" onClick={feedback.retry}>Retry feedback</button></p>}
         <p className="mb-3 text-[1rem] text-[#9ec4df]" aria-live="polite">
           {translate("generated.d604310a789a1848")} {displayedOffers.length} {translate("generated.28391d3bc64ec15c")} {offers.length} {translate("generated.80078650c6d04361")} {offersPage}
         </p>
@@ -664,6 +673,7 @@ export function ServerPickerModal({
           ) : (
             displayedOffers.map((offer) => {
               const isSelected = offer.id === selectedOfferId;
+              const machineId = feedbackOfferMachineId(offer);
               return (
                 <Card
                   key={offer.id}
@@ -730,8 +740,17 @@ export function ServerPickerModal({
                     </p>
                     <p>{translate("generated.de285d5895c16b9d")} {formatSpeed(offer.internetDownMbps)}</p>
                     <p>{translate("generated.63ff1ae736db3dd6")} {formatSpeed(offer.internetUpMbps)}</p>
-                    <p>{translate("generated.ec33b2e7693ac196")} {(offer.reliability * 100).toFixed(1)}%</p>
                   </div>
+
+                  <MachineFeedbackMetrics
+                    vastReliability={offer.reliability}
+                    machineId={machineId}
+                    summary={machineId ? feedback.summary(machineId) : undefined}
+                    enabled={feedback.enabled}
+                    loading={feedback.loading}
+                    unavailable={feedback.unavailable}
+                    onReviews={() => setReviewOffer(offer)}
+                  />
 
                   <Button
                     className="mt-3 w-full"
@@ -779,6 +798,8 @@ export function ServerPickerModal({
             </Button>
           </div>
         </div>
+
+        {reviewOffer && feedback.enabled && <MachineReviewsModal offer={reviewOffer} onClose={() => setReviewOffer(null)} />}
 
         {pendingOfferId !== null && (
           <ModalFrame
