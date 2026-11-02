@@ -35,6 +35,7 @@ where
 }
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=NOLAND_FEEDBACK_API_URL");
     println!("cargo:rerun-if-env-changed=NOLAND_SKIP_APP_BUILD_RS");
     println!("cargo:rerun-if-env-changed=NOLAND_SKIP_NATIVE_BUILD");
 
@@ -54,6 +55,7 @@ fn main() {
             .compile("noland_ios_platform");
         println!("cargo:rustc-link-lib=framework=UIKit");
         println!("cargo:rustc-link-lib=framework=Foundation");
+        println!("cargo:rustc-link-lib=framework=Security");
         println!("cargo:rustc-link-lib=z");
         // Swift bridge functions are resolved when Xcode links the final app.
         println!("cargo:rustc-link-arg-cdylib=-Wl,-undefined,dynamic_lookup");

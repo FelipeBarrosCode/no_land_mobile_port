@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { DestroyInstanceConfirmation } from "../feedback/DestroyInstanceConfirmation";
 import type { BlockingActionState } from "../../components/ui/BlockingLoaderOverlay";
 import { useLocalization, translate } from "../../lib/i18n";
 import { Button } from "../../components/ui/Button";
@@ -43,11 +44,6 @@ export function InstanceCardActions({
     loadingKey === "instance.files.upload";
 
   const handleDestroy = async () => {
-    if (!showDestroyConfirm) {
-      setShowDestroyConfirm(true);
-      return;
-    }
-
     await onDestroy(instance.instanceId);
     setShowDestroyConfirm(false);
   };
@@ -128,7 +124,8 @@ export function InstanceCardActions({
           disabled={actionDisabled}
           loading={loadingKey === "instance.destroy"}
           loadingText={translate("generated.81718696be2eed63")}
-          onClick={handleDestroy}
+          aria-expanded={showDestroyConfirm}
+          onClick={() => setShowDestroyConfirm(true)}
         >
           {showDestroyConfirm ? (
             "Confirm Destroy"
@@ -142,20 +139,12 @@ export function InstanceCardActions({
       </div>
 
       {showDestroyConfirm && (
-        <div className="text-xs text-red-300 bg-red-900/20 p-2 rounded border border-red-500/30">
-          {translate("generated.933882d245653198")} {instance.instanceId}{translate("generated.4567726876726721")}
-          <div className="mt-1 flex gap-2">
-            <button className="text-red-400 underline" onClick={handleDestroy}>
-              {translate("generated.3c98f82698fe06a8")}
-            </button>
-            <button
-              className="text-gray-400 underline"
-              onClick={() => setShowDestroyConfirm(false)}
-            >
-              {translate("generated.19766ed6ccb2f4a3")}
-            </button>
-          </div>
-        </div>
+        <DestroyInstanceConfirmation
+          instanceId={instance.instanceId}
+          onDestroy={handleDestroy}
+          onCancel={() => setShowDestroyConfirm(false)}
+          actionDisabled={actionDisabled}
+        />
       )}
     </div>
   );

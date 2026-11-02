@@ -46,6 +46,17 @@ impl JsonStateStore {
         let mut baseline = serde_json::to_value(PersistedAppState::default())?;
         reconcile_json(&mut baseline, &raw_value);
 
+        // Feedback consent is an atomic typed object, never a permissively merged set of fields.
+        baseline["feedbackProgram"] = serde_json::to_value(
+            if raw_value["version"]
+                .as_u64()
+                .is_none_or(|v| v == 0 || v > self.current_version as u64)
+            {
+                crate::models::feedback::FeedbackProgramState::default()
+            } else {
+                crate::models::feedback::decode_state(raw_value.get("feedbackProgram"))
+            },
+        )?;
         let mut migrated: PersistedAppState = serde_json::from_value(baseline)?;
         let current_instance_id = migrated.instance.instance_id;
         let direct_endpoint = (!migrated.wireguard.endpoint_host.trim().is_empty()
@@ -267,6 +278,26 @@ mod tests {
         base.join("state.json")
     }
 
+    #[test]
+    fn feedback_migration_is_additive_and_fails_closed_without_repairing_partial_consent() {
+        let store = JsonStateStore::new(PathBuf::from("state.json"), 4);
+        for raw in [
+            json!({"version": 4}),
+            json!({"version": 4, "feedbackProgram": {"enabled": true}}),
+            json!({"version": 999, "feedbackProgram": {"schemaVersion": 1, "enabled": true}}),
+        ] {
+            let state = store.migrate_value(raw).unwrap();
+            assert!(!state.feedback_program.enabled);
+            assert!(state.feedback_program.installation_id.is_none());
+        }
+        let state = store
+            .migrate_value(
+                json!({"version": 4, "onboardingCompleted": true, "feedbackProgram": "invalid"}),
+            )
+            .unwrap();
+        assert!(state.onboarding_completed);
+        assert!(!state.feedback_program.enabled);
+    }
     #[test]
     fn every_state_enables_embedded_moonlight_for_existing_servers() {
         let store = JsonStateStore::new(PathBuf::from("state.json"), 2);

@@ -1,0 +1,49 @@
+PART 1 OF 3 - PURPOSE, AUDIENCE, AND OPERATION
+
+Hello App Review Team,
+
+Thank you for reviewing No Land. The complete response is too large to fit within the message character limit, so it needed to be broken down into three separate messages. This is Part 1 of 3.
+
+1. Main features and intended purpose
+
+No Land allows users to access and control a rented, GPU-enabled Linux computer from their iPhone.
+
+Its primary use case is remote PC gaming, but the app is not limited to games. The remote computer provides a complete desktop environment that can also be used for other desktop-computing or GPU-intensive tasks.
+
+The app's main features are:
+
+- Finding GPU-powered computers available through Vast.ai.
+- Allowing users to select and rent a computer using their own Vast.ai account.
+- Automatically configuring the rented Linux computer for remote access.
+- Establishing a secure WireGuard connection between the iPhone and remote computer.
+- Streaming the remote computer's desktop, video, and audio to the iPhone.
+- Sending the user's input from the iPhone to the remote computer.
+- Allowing users to reconnect, pause, reboot, or terminate their rented computer.
+
+No Land provides access to computing infrastructure. It does not sell, license, or provide games.
+
+2. Intended target audience
+
+No Land is intended for iPhone users who want access to a GPU-enabled computer but do not own suitable computer hardware.
+
+This includes people who cannot afford or do not want to purchase a gaming computer, users who only occasionally need powerful GPU hardware, PC gamers who want to access their personally owned game libraries from an iPhone, and users who prefer a pay-as-you-go alternative to maintaining their own hardware.
+
+Users are responsible for obtaining any games or other software they use, including all required purchases, accounts, subscriptions, and licenses.
+
+3. How No Land works
+
+1. The user connects their own Vast.ai account. No Land uses the Vast.ai API to display available GPU computers and their prices, locations, storage, GPU specifications, and availability.
+
+2. The user selects a computer based on factors such as GPU, price, location, storage, and availability. The rental is associated with the user's Vast.ai account.
+
+3. No Land connects to the computer and configures the components required for remote access. This includes the Linux graphical environment, NVIDIA GPU configuration, Sunshine streaming host, audio services, and WireGuard networking.
+
+4. No Land establishes an encrypted WireGuard tunnel between the user's iPhone and that specific remote computer.
+
+5. The remote computer performs the processing and rendering. Video and audio are streamed to the iPhone, while the user's input is transmitted back to the computer.
+
+6. The user supplies their own games and software. No Land does not include a game library. Users may sign in to services such as Steam and install games they already own, subject to the relevant licensing terms.
+
+For example, a user may rent a GPU computer, connect to its Linux desktop, sign in to their own Steam account, install a game from their library, and stream the computer's display to their iPhone. No Land supplies the remote-computing and streaming functionality, not the game.
+
+Please continue to Part 2 of 3.

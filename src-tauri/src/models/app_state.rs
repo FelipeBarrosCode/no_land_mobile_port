@@ -14,6 +14,11 @@ pub struct PersistedAppState {
     #[serde(default)]
     pub has_completed_guided_setup: bool,
     pub credentials: CredentialsState,
+    #[serde(
+        default,
+        deserialize_with = "crate::models::feedback::deserialize_state"
+    )]
+    pub feedback_program: crate::models::feedback::FeedbackProgramState,
     pub ssh: SshState,
     pub location: LocationState,
     pub server_preferences: ServerPreferences,
@@ -48,6 +53,7 @@ impl Default for PersistedAppState {
             onboarding_completed: false,
             has_completed_guided_setup: false,
             credentials: CredentialsState::default(),
+            feedback_program: Default::default(),
             ssh: SshState::default(),
             location: LocationState::default(),
             server_preferences: ServerPreferences::default(),
@@ -253,6 +259,8 @@ fn default_mic_device_name() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct OfferCandidate {
     pub id: u64,
+    #[serde(default)]
+    pub machine_id: Option<String>,
     pub host_id: Option<u64>,
     pub host_label: String,
     pub location_label: String,
@@ -308,6 +316,12 @@ pub struct OfferCountryAvailability {
 #[serde(rename_all = "camelCase")]
 pub struct InstanceState {
     pub instance_id: Option<u64>,
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    #[serde(default)]
+    pub feedback_session_id: Option<String>,
+    #[serde(default)]
+    pub feedback_journal_ref: Option<String>,
     pub offer_id: Option<u64>,
     pub status: String,
     pub ssh_host: String,
@@ -327,6 +341,9 @@ impl Default for InstanceState {
     fn default() -> Self {
         Self {
             instance_id: None,
+            machine_id: None,
+            feedback_session_id: None,
+            feedback_journal_ref: None,
             offer_id: None,
             status: "idle".to_string(),
             ssh_host: String::new(),
@@ -624,6 +641,10 @@ pub struct RentedInstanceSummary {
     #[serde(default)]
     pub performance_overlay_enabled: bool,
     pub instance_id: u64,
+    #[serde(default)]
+    pub provider_instance_id: String,
+    #[serde(default)]
+    pub machine_id: Option<String>,
     pub label: String,
     pub status: String,
     pub gpu_name: String,
@@ -681,6 +702,12 @@ pub struct RemoteDisplayState {
 #[serde(rename_all = "camelCase")]
 pub struct ProvisionedServerState {
     pub instance_id: u64,
+    #[serde(default)]
+    pub machine_id: Option<String>,
+    #[serde(default)]
+    pub feedback_session_id: Option<String>,
+    #[serde(default)]
+    pub feedback_journal_ref: Option<String>,
     pub offer_id: Option<u64>,
     pub ssh_host: String,
     pub ssh_port: u16,
@@ -759,6 +786,9 @@ impl ProvisionedServerState {
     pub fn new(instance_id: u64) -> Self {
         Self {
             instance_id,
+            machine_id: None,
+            feedback_session_id: None,
+            feedback_journal_ref: None,
             offer_id: None,
             ssh_host: String::new(),
             ssh_port: 22,

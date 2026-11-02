@@ -11,6 +11,7 @@ import { Card } from "../components/ui/Card";
 import { ModalBody, ModalFrame } from "../components/ui/ModalFrame";
 import { SocialLinks } from "../components/ui/SocialLinks";
 import { DashboardScreen } from "../features/dashboard/DashboardScreen";
+import { FeedbackRuntime } from "../features/feedback/FeedbackRuntime";
 import { OnboardingScreen } from "../features/onboarding/OnboardingScreen";
 import { ProvisioningScreen } from "../features/provisioning/ProvisioningScreen";
 import { SettingsScreen } from "../features/settings/SettingsScreen";
@@ -853,6 +854,7 @@ export function App() {
 
   return (
     <>
+      <FeedbackRuntime appState={appState} />
       {error && (
         <div className="fixed right-4 top-4 z-[100] max-w-md border-2 border-[#ff687d] bg-[#431a28] px-4 py-3 text-[1.2rem] text-[#ffd3dc] shadow-[0_0_0_2px_#090a17,inset_0_0_0_2px_#60243a]">
           <div className="flex items-start justify-between gap-3">

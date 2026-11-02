@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { errorMessage } from "../../lib/errorMessage";
+import { platformUsernameError, platformPasswordError } from "../../lib/platformCredentials";
 import { ArcadeSoundToggle } from "../../components/ui/ArcadeSoundToggle";
 import { Button } from "../../components/ui/Button";
 import { VastReferralDisclosure } from "../../components/VastReferralDisclosure";
@@ -445,12 +446,14 @@ export function SettingsScreen({
         <InputField
           label={translate("generated.c08537e7f04a3efa")}
           value={platformUsername}
+          error={platformUsernameError(platformUsername)}
           onChange={(event) => setPlatformUsername(event.target.value)}
         />
         <InputField
           label={translate("generated.05b11713ab17a2e3")}
           type="password"
           value={platformPassword}
+          error={platformPasswordError(platformPassword)}
           onChange={(event) => setPlatformPassword(event.target.value)}
         />
       </div>
@@ -458,13 +461,13 @@ export function SettingsScreen({
         <Button
           disabled={
             busy ||
-            platformUsername.trim().length < 3 ||
-            platformPassword.trim().length < 6
+            Boolean(platformUsernameError(platformUsername)) ||
+            Boolean(platformPasswordError(platformPassword))
           }
           onClick={() =>
             onSavePlatformCredentials({
-              appUsername: platformUsername.trim(),
-              appPassword: platformPassword.trim(),
+              appUsername: platformUsername,
+              appPassword: platformPassword,
             })
           }
         >

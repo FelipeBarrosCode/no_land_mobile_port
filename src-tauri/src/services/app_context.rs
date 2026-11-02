@@ -24,6 +24,7 @@ use super::{app_config::AppConfig, state_store::StateStore};
 #[derive(Clone)]
 pub struct AppContext {
     pub config: AppConfig,
+    pub feedback: Arc<super::feedback::FeedbackProgramService>,
     pub state_store: Arc<dyn StateStore>,
     pub state: Arc<RwLock<PersistedAppState>>,
     pub http_client: reqwest::Client,
@@ -94,8 +95,13 @@ impl AppContext {
         state_store: Arc<dyn StateStore>,
         initial_state: PersistedAppState,
     ) -> Self {
+        let feedback = Arc::new(super::feedback::FeedbackProgramService::new(
+            state_store.path(),
+            &initial_state.feedback_program,
+        ));
         Self {
             config,
+            feedback,
             state_store,
             state: Arc::new(RwLock::new(initial_state)),
             http_client: reqwest::Client::new(),
@@ -159,6 +165,7 @@ impl AppContext {
 
     pub async fn reload_state_from_disk(&self) -> AppResult<PersistedAppState> {
         let fresh_state = self.state_store.load_state().await?;
+        self.feedback.reconcile_state(&fresh_state.feedback_program);
         {
             let mut state = self.state.write().await;
             *state = fresh_state.clone();

@@ -1,0 +1,52 @@
+# Feedback UI — iOS frontend/native handoff
+
+Frontend changes are limited to `src/**`, new feedback UI tests, and this document. Native/network files remain owned by the native agent. No commits, pushes, real feedback submissions, provider operations or application/native compilation are part of this implementation.
+
+## Native seam and coordination
+
+All feedback commands use the exact camelCase Tauri arguments in `no_land_feedback_api/IMPLEMENTATION_COORDINATION.md`, through the existing `invokeSafe`. JavaScript never calls a feedback HTTP route, creates an installation identity, stores credentials, reads the native secret store or writes feedback state.json.
+
+- `feedback_program_status` is the only automatic program command, on launch/local state changes and foreground/30-second local polling. It must stay local-only while disabled. Native remains the final consent/capability/credential gate.
+- Published notices are requested only when the user opens the program UI or explicitly retries. Enrollment needs server-provided versions, availability, disclosure, contact and valid HTTPS Privacy/Terms/deletion links. No service URL or policy/operator information is invented.
+- The native model was inspected: enrollmentStatus includes enrolling; pendingControlAction is null or an object with kind (consent/delete), requestId, expectedEpoch, enabled, optionalContextEnabled and optional afterAck (consent/delete/null). The UI distinguishes deletion queued behind a consent acknowledgement, uncertain enrollment recovery, withdrawal and scope/rejoin synchronization. Frontend types mirror this, fail closed on missing/malformed/future consent, and type references—not credentials.
+- Native offers currently serialize a lossless `machineId` string, populated from Vast `machine_id` in Rust. `lib/backend.ts::searchOffers` normalizes that verified string to frontend `providerMachineId`. Cards and reviews also use the same accessor for existing state-backed offers. An explicitly supplied providerMachineId takes precedence; conflicting valid string IDs fail closed. Numbers and invalid/out-of-range IDs are rejected. No fallback to offer/host IDs, labels, hardware, or endpoints exists. Offer identity, provider ranking and original objects are preserved.
+- `feedback_review_eligibility` is authoritative: a tracked enrollment and actual first-frame evidence are required. Legacy numeric rental IDs enter the string seam only if positive safe integers; unsafe JS values disable the optional review rather than stringify a rounded ID.
+- `feedback_stage_review` is local/durable and precedes the established backup/provider destruction invocation. Native must publish only after confirmed provider deletion. Persistence errors or a 3-second local timeout show a nonblocking warning and still call normal destruction.
+- Consent/deletion commands return local status with durable pending controls/receipt fields. Withdrawal/deletion immediately hides community data and rejects stale replies. A pre-control status reply cannot re-enable reads. Native enrollmentStatus=deleted means deletion acknowledged/excluded from reads, not necessarily that server purge is complete; the UI shows the receipt separately. A pending command never traps the user in the program dialog or disables normal app actions.
+
+## Implemented UI
+
+- Top-left dashboard Feedback program button, also first in the small-screen MobileSideMenu.
+- Enrollment disclosure, unchecked required consent, separate unchecked optional context, optional allowlisted broad profile with all fields skippable. No name/email/fingerprint request. Native configuration/capability errors, pending withdrawal/deletion/rejoin, next-new-rental behavior, scope changes, explicit stop/delete and linked server policies.
+- Actual ServerPickerModal enrichment for displayed offers. IDs and overlapping in-flight requests deduplicate per machine; batches contain at most 100 IDs. Offer identity and Vast filtering/sorting/recommendation/automatic selection stay unchanged and labelled as Vast.
+- Separate displayed reliability replaces Vast only with at least two consistent valid setup outcomes, including 0%. Source, eligible count and small-sample notice (fewer than 10 outcomes) are visible. Zero/one outcome keeps Vast. Setup observation age is distinct from summary generation age; missing dates are labelled unavailable rather than pretending old evidence is fresh. Original Vast provenance, historical date ranges and compatible direct/relay/mixed jitter groups are supported in review details. Null, unsupported, partial, inconsistent or invalid jitter stays N/A; actual measured zero remains zero. Zero comments show N/A with the zero count, without discarding rating-only summaries.
+- Accessible message-icon button stops click/keyboard propagation. Reviews include rating-only feedback, coarse historical hardware, publication date, escaped plain text, opaque-cursor pagination, report and server-side block-by-review controls. Setup vs uptime, metric sampling and client/network-path effects are disclosed.
+- Existing inline destruction confirmation: ten unselected optional rating choices, optional 2,000-character comment, Submit and destroy / Skip and destroy / Cancel for native-frame-eligible rentals only. No feedback popup or eligibility command while disabled, and no prompt from pairing alone. Automatic/exit destruction remains noninteractive and invents no review.
+- Labelled program/review dialogs trap keyboard focus, restore focus, handle Escape without closing the underlying picker, and reuse safe-area-aware ModalFrame scrolling. The mobile drawer now unmounts inactive actions (no off-screen tabbable feedback entry), traps focus when open and restores its trigger. Wrapping layouts, at least 44px feedback actions and 16px inputs accommodate phone/tablet widths. Platform copy uses existing native build detection, never user-agent identity.
+
+## Cache and visibility
+
+A bounded memory-only summary cache expires after 60 seconds and checks expiry on every read. Keys include viewer, installation, consent epoch, policy versions, canonical metric and visibility revision. Viewer-filtered counts are never shared between viewers. Program controls, local lifecycle transitions, destruction, report/block attempts and explicit refresh invalidate data; stale replies are discarded. Idle active cards recheck expiry every 5 seconds. Failed UI reads wait 60 seconds unless explicitly retried; native transport owns Retry-After/backoff.
+
+Review pages are not shared/cached across openings. Each loaded page expires after 60 seconds and its rows are removed, without resetting the forward cursor: a user can keep reading later retained pages instead of being forced back to page one. Refresh reloads from the start. Visibility revisions hide old rows immediately. Duplicate rows and cursor loops are guarded.
+
+## Validation
+
+Node 22.18+ supports the native TypeScript stripping used here (workspace Node 26):
+
+    node --test src/features/feedback/__tests__/*.test.mjs
+
+Tests cover pure state/ID/summary/draft/cache behavior, the real Zustand store and exact native invocation wrappers using mocked native responses, the actual search adapter with provider/native fixtures (including IDs larger than Number.MAX_SAFE_INTEGER), and source-level UI wiring/accessibility invariants. They use Node test/assert and installed dependencies only. No tsc, bundler, new dependency, network call or native compilation is required. Source invariants are not a substitute for rendered/interactive UI tests.
+
+Validation performed: `node --test src/features/feedback/__tests__/*.test.mjs` and `git diff --check -- src docs/FEEDBACK_UI.md`. No build or typecheck was run.
+
+Only the main coordinator may run frontend `tsc --noEmit`, and only after all implementation agents finish. No application builds, native checks/tests/builds, Cargo, Xcode, Gradle or Tauri compilation are authorized for this task. Real iPhone/iPad WebView, VoiceOver, keyboard/rotation, frame evidence and secure-store behavior have not been verified here.
+
+## Boundaries and follow-ups
+
+- Enrollment requires a configured service with published operator/contact/policies. Unsupported jitter stays N/A. No continuous iOS background delivery is promised.
+- Changed policy versions on an existing enrollment keep rejoin unavailable until native supports the necessary renewal. An uncertain enrollment retry must use its original choices; native rejects changed choices rather than overwrite a protected recovery proof. Choices are preserved in the open form; after restart they must be re-entered identically.
+- Eligibility and unsaved drafts are bound to the current viewer/consent/rental, not just a possibly reused consent epoch. Explicit Skip uses the existing `feedback_stage_review` with null/null, matching desktop cancellation semantics. It awaits durable replacement of any previous draft with an independently revisioned native tombstone before normal destruction. No empty review PUT is sent; native deletes remotely if an earlier review may have been sent. Persistence failure or a 3-second timeout warns that an older draft may remain but never vetoes destruction. A timeout is unconfirmed persistence, not proof of clearing. Cancel still only dismisses the confirmation; it does not stage or clear feedback.
+- Native metadata handoff limitation observed during source review: `src-tauri/src/models/feedback.rs::{MachineSummary,ReliabilitySummary,JitterSummary}` currently drops optional `jitterGroups`, `firstObservedAt`, `lastObservedAt` and cadence/completeness/threshold provenance during allowlisted reserialization. Frontend accepts/validates and displays these contract-permitted fields when supplied, but currently shows actual observation age as unavailable and cannot show route groups from this native DTO. The native owner should preserve those fields (with allowlisted typed validation); the frontend does not substitute summary generation time for observation age. No native files were edited to address this.
+- The app store now propagates destruction failure to the existing confirmation after retaining its normal error/report handling, so a failed backup/deletion does not silently dismiss that confirmation. Lost acknowledgements are described as unconfirmed, not invented success/failure.
+- Pre-existing README changes, deleted SSH runtime README and untracked apple-review-response files are untouched.

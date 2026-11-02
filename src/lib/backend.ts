@@ -1,6 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { invokeSafe } from "./tauri";
 import { getActiveLocale, translate } from "./i18n";
+import { feedbackOfferMachineId } from "../features/feedback/model";
 import type {
   AutoShutdownSettings,
   AutoShutdownState,
@@ -118,7 +119,8 @@ export async function searchOffers(
   page = 1,
   pageSize = 24,
 ): Promise<OfferCandidate[]> {
-  return invokeSafe<OfferCandidate[]>("search_offers", { page, pageSize });
+  const offers = await invokeSafe<OfferCandidate[]>("search_offers", { page, pageSize });
+  return offers.map((offer) => ({ ...offer, providerMachineId: feedbackOfferMachineId(offer) }));
 }
 
 export async function listAvailableOfferCountries(): Promise<

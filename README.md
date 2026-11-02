@@ -4,6 +4,8 @@
 
 ### Turn on-demand GPU cloud machines into personal remote gaming PCs.
 
+[![iOS build](https://img.shields.io/github/v/release/FelipeBarrosCode/no_land_mobile_port?include_prereleases&filter=ios-v*&sort=date&label=iOS%20build)](https://github.com/FelipeBarrosCode/no_land_mobile_port/releases?q=ios-v&expanded=true)
+
 [![Rust](https://img.shields.io/badge/Rust-Tauri-000000?logo=rust)](https://www.rust-lang.org/)
 [![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white)](https://tauri.app/)
 [![React](https://img.shields.io/badge/React-TypeScript-20232a?logo=react)](https://react.dev/)
@@ -17,6 +19,18 @@
 </div>
 
 ---
+
+## Download the current iOS build
+
+The **iOS build** badge above shows the newest published iOS release tag, including preview builds. It updates automatically from GitHub Releases, independently of the source version in `package.json`.
+
+[Download the IPA and SHA-256 checksums](https://github.com/FelipeBarrosCode/no_land_mobile_port/releases?q=ios-v&expanded=true). The currently published preview IPA is **unsigned**: it requires signing before installation on a physical device and is not an App Store or TestFlight distribution.
+
+You can also inspect available builds with the GitHub CLI:
+
+```sh
+gh release list --repo FelipeBarrosCode/no_land_mobile_port --exclude-drafts
+```
 
 ## Why No Land exists
 

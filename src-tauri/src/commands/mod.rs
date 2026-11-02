@@ -1,5 +1,7 @@
 pub mod auto_shutdown;
 pub mod connection;
+pub mod feedback;
+pub use self::feedback::*;
 pub mod launch_library;
 pub mod shared_storage;
 
@@ -560,14 +562,21 @@ async fn ensure_network_agent_for_stream(context: &AppContext, instance_id: u64)
     });
 }
 
-async fn start_network_monitor(app: &AppHandle, target_host: String) {
+async fn start_network_monitor(app: &AppHandle, target_host: String, host_id: &str) {
     let monitor = app.state::<NetworkMonitor>().inner().clone();
-    if let Err(error) = monitor.start(app.clone(), target_host.clone()).await {
+    app.state::<AppContext>().feedback.checkpoint();
+    let state = app.state::<AppContext>().load_state().await;
+    let rental = resolve_instance_id_for_embedded_host(&state, host_id);
+    if let Err(error) = monitor
+        .start(app.clone(), target_host.clone(), rental)
+        .await
+    {
         warn!(target_host, %error, "Network monitor could not start; streaming will continue");
     }
 }
 
 async fn stop_network_monitor(app: &AppHandle) {
+    app.state::<AppContext>().feedback.stream_stopped();
     app.state::<NetworkMonitor>().stop().await;
 }
 
@@ -1181,8 +1190,8 @@ async fn fetch_embedded_apps_via_sunshine_api(
     host_address: &str,
 ) -> Result<Vec<crate::moonlight::domain::RemoteApp>, FrontendError> {
     let state = context.load_state().await;
-    let username = state.credentials.app_username.trim().to_string();
-    let password = state.credentials.app_password.trim().to_string();
+    let username = state.credentials.app_username.clone();
+    let password = state.credentials.app_password.clone();
     if username.is_empty() || password.is_empty() {
         return Err(FrontendError {
             code: "moonlight_invalid_input".to_string(),
@@ -1763,7 +1772,7 @@ async fn start_embedded_stream_for_host(
         crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
     };
     let _ = activate_native_stream_input(&stream_window, preferred_capture_mode);
-    start_network_monitor(app, prepared.host_address.clone()).await;
+    start_network_monitor(app, prepared.host_address.clone(), &host_id).await;
 
     let state = moonlight
         .runtime
@@ -2309,6 +2318,10 @@ pub async fn resume_provisioning_existing_instance(
     context
         .update_state(|state| {
             state.instance.instance_id = Some(instance_id);
+            state.instance.machine_id = server.machine_id.clone();
+            let reference = context.feedback.rental_reference(instance_id);
+            state.instance.feedback_session_id = reference.as_ref().map(|r| r.0.clone());
+            state.instance.feedback_journal_ref = reference.map(|r| r.1);
             state.instance.offer_id = server.offer_id;
             state.instance.status = server.status.clone();
             state.instance.ssh_host = server.ssh_host.clone();
@@ -2497,6 +2510,19 @@ pub(super) async fn start_launch_pc_for_instance(
             }
         }
 
+        // Both explicit and automatic pairing paths have now verified the native host repository.
+        context
+            .feedback
+            .milestone(instance_id, crate::models::feedback::Milestone::Paired);
+        if state_snapshot
+            .provisioned_servers
+            .iter()
+            .any(|r| r.instance_id == instance_id && r.steps.instance_ready)
+        {
+            context
+                .feedback
+                .milestone(instance_id, crate::models::feedback::Milestone::Ready);
+        }
         let host_address = resolve_embedded_moonlight_host_address(&state_snapshot, instance_id)
             .unwrap_or_default();
         let apps = match apps::list_remote_apps(
@@ -2836,6 +2862,11 @@ pub async fn get_rented_instances(
                         state.moonlight_preferences.showperfoverlay != 0,
                     ),
                 instance_id: instance.id,
+                provider_instance_id: instance.id.to_string(),
+                machine_id: instance
+                    .machine_id
+                    .clone()
+                    .or_else(|| server.and_then(|r| r.machine_id.clone())),
                 label: if instance.label.is_empty() {
                     format!("Instance {}", instance.id)
                 } else {
@@ -2922,18 +2953,13 @@ pub async fn update_platform_credentials(
     payload: PlatformCredentialsUpdate,
     context: State<'_, AppContext>,
 ) -> Result<PersistedAppState, FrontendError> {
-    if payload.app_username.trim().len() < 3 {
-        return Err(
-            AppError::InvalidInput("Username must have at least 3 characters".to_string()).into(),
-        );
-    }
-    if payload.app_password.len() < 6 {
-        return Err(
-            AppError::InvalidInput("Password must have at least 6 characters".to_string()).into(),
-        );
-    }
+    crate::services::platform_credentials::validate_platform_credentials(
+        &payload.app_username,
+        &payload.app_password,
+    )
+    .map_err(AppError::InvalidInput)?;
 
-    let app_username = payload.app_username.trim().to_string();
+    let app_username = payload.app_username;
     let app_password = payload.app_password;
 
     let next_state = context
@@ -3476,16 +3502,11 @@ pub async fn update_ssh_credentials(
 }
 
 fn validate_onboarding_payload(payload: &OnboardingPayload) -> Result<(), FrontendError> {
-    if payload.app_username.trim().len() < 3 {
-        return Err(
-            AppError::InvalidInput("Username must have at least 3 characters".to_string()).into(),
-        );
-    }
-    if payload.app_password.len() < 6 {
-        return Err(
-            AppError::InvalidInput("Password must have at least 6 characters".to_string()).into(),
-        );
-    }
+    crate::services::platform_credentials::validate_platform_credentials(
+        &payload.app_username,
+        &payload.app_password,
+    )
+    .map_err(AppError::InvalidInput)?;
     if payload.vast_api_key.trim().len() < 16 {
         return Err(AppError::InvalidInput("Vast API key looks invalid".to_string()).into());
     }
@@ -3742,6 +3763,13 @@ async fn refresh_instance_connection_state(
             record.ssh_host = instance.ssh_host.clone();
             record.ssh_port = instance.ssh_port;
             record.ssh_command = instance.ssh_command.clone();
+            record.machine_id = instance.machine_id.clone().or_else(|| record.machine_id.clone());
+            let reference = context.feedback.rental_reference(instance.id);
+            record.feedback_session_id = reference.as_ref().map(|r| r.0.clone());
+            record.feedback_journal_ref = reference.as_ref().map(|r| r.1.clone());
+            state.instance.machine_id = record.machine_id.clone();
+            state.instance.feedback_session_id = reference.as_ref().map(|r| r.0.clone());
+            state.instance.feedback_journal_ref = reference.map(|r| r.1);
             record.connection_provider = ConnectionProvider::Wireguard;
             record.wireguard_server_ip = result.server_ip.clone();
             record.wireguard_client_ip = result.client_ip.clone();
@@ -3899,6 +3927,13 @@ pub(crate) async fn sync_instance_connection_internal(
             record.hourly_price = instance.hourly_price;
             record.compute_hourly_price = instance.compute_hourly_price;
             record.storage_hourly_price = instance.storage_hourly_price;
+            record.machine_id = instance.machine_id.clone().or_else(|| record.machine_id.clone());
+            let reference = context.feedback.rental_reference(instance.id);
+            record.feedback_session_id = reference.as_ref().map(|r| r.0.clone());
+            record.feedback_journal_ref = reference.as_ref().map(|r| r.1.clone());
+            state.instance.machine_id = record.machine_id.clone();
+            state.instance.feedback_session_id = reference.as_ref().map(|r| r.0.clone());
+            state.instance.feedback_journal_ref = reference.map(|r| r.1);
             state.instance.instance_id = Some(instance.id);
             state.instance.status = instance.status.clone();
             state.instance.ssh_host = instance.ssh_host.clone();
@@ -4291,6 +4326,12 @@ async fn teardown_local_instance_session(
     moonlight: &MoonlightManager,
     instance_id: u64,
 ) {
+    // Persist independently of backup/provider availability, before any source object is torn down.
+    context
+        .feedback
+        .capture_frames(context, &moonlight.runtime)
+        .await;
+    context.feedback.checkpoint();
     if let Err(error) = MicPassthroughService::disable(context, instance_id).await {
         if !matches!(error, AppError::InvalidInput(_)) {
             warn!(
@@ -4305,6 +4346,8 @@ async fn teardown_local_instance_session(
         return;
     }
 
+    context.feedback.stream_stopped();
+    stop_network_monitor(app).await;
     if let Err(error) = moonlight.runtime.stop().await {
         warn!(
             instance_id = instance_id,
@@ -5214,14 +5257,24 @@ pub async fn moonlight_complete_pairing(
     ensure_embedded_identity_ready_for_explicit_action(context.inner(), moonlight.inner())
         .await
         .map_err(moonlight_frontend_error)?;
-    pairing::complete_pairing(
+    let result = pairing::complete_pairing(
         moonlight.repository.as_ref(),
         moonlight.secret_store.as_ref(),
         &moonlight.pairing_sessions,
         &PairingSessionId(input.session_id),
     )
     .await
-    .map_err(moonlight_frontend_error)
+    .map_err(moonlight_frontend_error)?;
+    if embedded_host_is_paired(moonlight.repository.as_ref(), &result.host_id) {
+        if let Some(instance) =
+            resolve_instance_id_for_embedded_host(&context.load_state().await, &result.host_id)
+        {
+            context
+                .feedback
+                .milestone(instance, crate::models::feedback::Milestone::Paired);
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]
@@ -5393,7 +5446,7 @@ pub async fn moonlight_start_stream(
         crate::moonlight::domain::MouseMode::Absolute => CaptureMouseMode::Absolute,
     };
     let _ = activate_native_stream_input(&stream_window, preferred_capture_mode);
-    start_network_monitor(&app, prepared.host_address.clone()).await;
+    start_network_monitor(&app, prepared.host_address.clone(), &input.host_id).await;
 
     let state = moonlight
         .runtime

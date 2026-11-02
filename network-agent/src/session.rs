@@ -43,6 +43,7 @@ impl RateLimiter {
 pub struct Session {
     pub token: [u8; 32],
     pub window: TelemetryWindow,
+    pub feedback_evidence: Option<(String, u64, Option<u64>, Instant)>,
     pub state: StateMachine,
     pub udp_rate: RateLimiter,
     pub allowed_probe_paths: Vec<TransportKind>,
@@ -91,6 +92,7 @@ impl SessionRegistry {
             Session {
                 token,
                 window: TelemetryWindow::default(),
+                feedback_evidence: None,
                 state: StateMachine::default(),
                 udp_rate: RateLimiter::new(self.udp_rate_limit),
                 allowed_probe_paths: vec![TransportKind::Direct],
@@ -125,6 +127,7 @@ impl SessionRegistry {
             Session {
                 token,
                 window: TelemetryWindow::default(),
+                feedback_evidence: None,
                 state: StateMachine::default(),
                 udp_rate: RateLimiter::new(max_packets_per_second),
                 allowed_probe_paths: allowed_paths,

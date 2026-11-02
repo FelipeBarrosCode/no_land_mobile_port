@@ -16,6 +16,13 @@ pub struct TelemetryWindow {
 impl TelemetryWindow {
     pub fn push(&mut self, sample: MeasurementSample, now: Instant) {
         self.prune(now);
+        if self
+            .samples
+            .iter()
+            .any(|existing| existing.sequence == sample.sequence)
+        {
+            return;
+        }
         self.samples.push_back(StoredSample::new(sample, now));
         while self.samples.len() > MAX_WINDOW_SAMPLES {
             self.samples.pop_front();

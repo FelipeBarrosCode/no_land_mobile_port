@@ -6,6 +6,8 @@ use std::net::IpAddr;
 #[serde(rename_all = "camelCase")]
 pub struct VastOffer {
     pub id: u64,
+    #[serde(default)]
+    pub machine_id: Option<String>,
     pub host_id: Option<u64>,
     pub host_label: String,
     pub city: String,
@@ -66,6 +68,7 @@ impl VastOffer {
 
         Some(Self {
             id,
+            machine_id: crate::models::feedback::provider_id_value(value.get("machine_id")),
             host_id: value.get("host_id").and_then(Value::as_u64),
             host_label,
             city,
@@ -191,6 +194,8 @@ fn parse_offer_type(value: &Value) -> String {
 #[serde(rename_all = "camelCase")]
 pub struct VastInstance {
     pub id: u64,
+    #[serde(default)]
+    pub machine_id: Option<String>,
     pub label: String,
     pub status: String,
     pub ssh_host: String,
@@ -290,6 +295,7 @@ impl VastInstance {
 
         Some(Self {
             id,
+            machine_id: crate::models::feedback::provider_id_value(value.get("machine_id")),
             label: value
                 .get("label")
                 .or_else(|| value.get("hostname"))
