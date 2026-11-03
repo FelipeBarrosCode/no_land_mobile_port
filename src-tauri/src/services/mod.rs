@@ -6,8 +6,8 @@ pub mod cloudflare_turn;
 pub mod connection_manager;
 pub mod diagnostics;
 pub mod display_profile;
-pub mod health_check;
 pub mod feedback;
+pub mod health_check;
 pub mod instance_lifecycle;
 pub mod instance_manager;
 #[cfg(target_os = "ios")]
@@ -30,8 +30,8 @@ pub mod orchestration;
 pub mod os_detection;
 mod package_manager;
 
-pub mod post_wireguard_setup;
 pub mod platform_credentials;
+pub mod post_wireguard_setup;
 mod provisioning;
 pub mod reboot_helper;
 pub mod remote_display;
