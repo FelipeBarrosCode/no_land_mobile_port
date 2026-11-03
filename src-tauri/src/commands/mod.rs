@@ -3763,7 +3763,10 @@ async fn refresh_instance_connection_state(
             record.ssh_host = instance.ssh_host.clone();
             record.ssh_port = instance.ssh_port;
             record.ssh_command = instance.ssh_command.clone();
-            record.machine_id = instance.machine_id.clone().or_else(|| record.machine_id.clone());
+            record.machine_id = instance
+                .machine_id
+                .clone()
+                .or_else(|| record.machine_id.clone());
             let reference = context.feedback.rental_reference(instance.id);
             record.feedback_session_id = reference.as_ref().map(|r| r.0.clone());
             record.feedback_journal_ref = reference.as_ref().map(|r| r.1.clone());
@@ -3927,7 +3930,10 @@ pub(crate) async fn sync_instance_connection_internal(
             record.hourly_price = instance.hourly_price;
             record.compute_hourly_price = instance.compute_hourly_price;
             record.storage_hourly_price = instance.storage_hourly_price;
-            record.machine_id = instance.machine_id.clone().or_else(|| record.machine_id.clone());
+            record.machine_id = instance
+                .machine_id
+                .clone()
+                .or_else(|| record.machine_id.clone());
             let reference = context.feedback.rental_reference(instance.id);
             record.feedback_session_id = reference.as_ref().map(|r| r.0.clone());
             record.feedback_journal_ref = reference.as_ref().map(|r| r.1.clone());
