@@ -741,7 +741,9 @@ export function DashboardScreen({
                          disabled={busy || !isActive}
                         onClick={() => setTerminalInstanceId(instance.instanceId)}
                       >
-                        <SpriteIcon icon="terminal" className="h-5 w-5" />
+                        <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                          <path d="m4 6 6 6-6 6M13 18h7" />
+                        </svg>
                       </Button>
                       <Button
                         variant="ghost"
