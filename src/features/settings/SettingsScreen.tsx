@@ -12,6 +12,7 @@ import { MobileMenuButton, MobileSideMenu } from "../../components/ui/MobileSide
 import { SharedStorageSettingsV2 } from "../shared-storage/SharedStorageSettingsV2";
 import { AutoShutdownSettings } from "./AutoShutdownSettings";
 import { NotificationSettings } from "./NotificationSettings";
+import { RemoteDesktopPasswordSettings } from "./RemoteDesktopPasswordSettings";
 import { LOCALE_OPTIONS, translateSource, useLocalization, type LocalePreference, translate } from "../../lib/i18n";
 import {
   getInstanceConnectionStatus,
@@ -474,6 +475,11 @@ export function SettingsScreen({
           {translate("generated.40d82323d391ccb1")}
         </Button>
       </div>
+      <RemoteDesktopPasswordSettings
+        servers={appState.provisionedServers}
+        busy={busy}
+        hasUnsavedPassword={platformPassword !== appState.credentials.appPassword}
+      />
       <div className="mt-4 border-t border-[#3b4067] pt-4">
         <h3 className="font-display text-[10px] uppercase tracking-[0.12em] text-neon-cyan">
           {translate("generated.96e6b34fbf9d39dd")}
