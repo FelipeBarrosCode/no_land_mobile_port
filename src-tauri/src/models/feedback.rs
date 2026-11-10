@@ -202,6 +202,9 @@ impl Lifecycle {
         self.observe_ordered(milestone, now(), order)
     }
     pub fn observe_ordered(&mut self, milestone: Milestone, at: String, order: u64) -> bool {
+        if order <= 1 || self.event_order.destroyed.is_some_and(|d| order >= d) {
+            return false;
+        }
         let (time, sequence) = match milestone {
             Milestone::Ready => (&mut self.ready_at, &mut self.event_order.ready),
             Milestone::Paired => (&mut self.paired_at, &mut self.event_order.paired),
@@ -211,7 +214,7 @@ impl Lifecycle {
             ),
             Milestone::Destroyed => (&mut self.destroyed_at, &mut self.event_order.destroyed),
         };
-        if time.is_some() || order <= 1 || self.event_order.destroyed.is_some_and(|d| order >= d) {
+        if time.is_some() {
             return false;
         }
         *time = Some(at);

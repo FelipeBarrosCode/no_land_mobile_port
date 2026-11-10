@@ -133,17 +133,21 @@ pub async fn feedback_machine_reviews(
     if !(1..=50).contains(&limit) || cursor.as_ref().is_some_and(|s| s.len() > 2048) {
         return Err("Review page exceeds its bounds".into());
     }
-    let mut query = form_urlencoded::Serializer::new(String::new());
-    query.append_pair("limit", &limit.to_string());
-    if let Some(cursor) = cursor {
-        query.append_pair("cursor", &cursor);
-    }
+    // Finish the non-Send serializer before constructing the command future.
+    let query = {
+        let mut query = form_urlencoded::Serializer::new(String::new());
+        query.append_pair("limit", &limit.to_string());
+        if let Some(cursor) = cursor {
+            query.append_pair("cursor", &cursor);
+        }
+        query.finish()
+    };
     let value = context
         .feedback
         .participant_request(
             context.inner(),
             Method::GET,
-            &format!("/machines/{machine}/reviews?{}", query.finish()),
+            &format!("/machines/{machine}/reviews?{query}"),
             None,
         )
         .await?;
