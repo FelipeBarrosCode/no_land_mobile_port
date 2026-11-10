@@ -118,7 +118,7 @@ impl FeedbackProgramService {
         serde_json::from_slice(&bytes)
             .map_err(|_| ApiError::local("Feedback response is not valid JSON"))
     }
-    fn retry_error(&self, error: &ApiError) {
+    pub(super) fn retry_error(&self, error: &ApiError) {
         self.note(error.message.clone());
         if error.retryable {
             if let Ok(mut retry) = self.retry.lock() {
@@ -146,7 +146,7 @@ impl FeedbackProgramService {
             self.credential_available.store(false, Ordering::SeqCst);
         }
     }
-    fn retry_success(&self) {
+    pub(super) fn retry_success(&self) {
         if let Ok(mut retry) = self.retry.lock() {
             retry.failures = 0;
             // Another request may have received 429 while this successful request was already in flight.

@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import { useEffect, useId, useRef, type ReactNode } from "react";
 
 interface Props {
@@ -78,7 +79,7 @@ export function MobileSideMenu({ open, title, onClose, children }: Props) {
     >
       <button
         type="button"
-        aria-label={`Close ${title}`}
+        aria-label={translate("feedback.31225400a92b9e0f", { value0: title })}
         tabIndex={-1}
         onClick={onClose}
         className={`absolute inset-0 bg-black/65 transition-opacity ${open ? "opacity-100" : "opacity-0"}`}
@@ -99,7 +100,7 @@ export function MobileSideMenu({ open, title, onClose, children }: Props) {
             type="button"
             onClick={onClose}
             className="flex size-11 items-center justify-center text-2xl text-white"
-            aria-label={`Close ${title}`}
+            aria-label={translate("feedback.31225400a92b9e0f", { value0: title })}
           >
             <span aria-hidden="true">{String.fromCharCode(215)}</span>
           </button>

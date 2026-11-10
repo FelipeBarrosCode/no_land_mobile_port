@@ -23,6 +23,7 @@ jobs:
             network-contracts
             network-agent
       - run: npm ci
+      - run: npm run test:scripts
       - name: Existing unit-test entry point
         run: npm run test:unit
       - name: Verify provisioning package plans and dual-architecture artifacts
