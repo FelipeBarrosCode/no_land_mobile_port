@@ -28,6 +28,7 @@ sha2 = "0.10.9"
 tauri-build = { version = "2.0.0", features = [] }
 
 [dependencies]
+noland-runtime-contracts = { path = "../runtime-contracts" }
 noland-network-contracts = { path = "../network-contracts" }
 noland-rclone-adapter = { path = "../state-agent/crates/noland-rclone-adapter" }
 async-trait = "0.1.83"
@@ -37,14 +38,6 @@ chrono = { version = "0.4.38", features = ["serde"] }
 crossbeam-channel = "0.5.13"
 dirs = "5.0.1"
 futures-util = "0.3"
-keyring = {
-    version = "3.6.1",
-    features = [
-        "apple-native",
-        "windows-native",
-        "linux-native-sync-persistent",
-    ],
-}
 parking_lot = "0.12.3"
 rand_core = "0.6.4"
 raw-window-handle = "0.6.2"
@@ -78,6 +71,10 @@ tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt", "tim
 uuid = { version = "1.11.0", features = ["v4", "serde"] }
 x25519-dalek = { version = "2.0.1", features = ["static_secrets"] }
 x509-parser = "0.16.0"
+
+[dependencies.keyring]
+version = "3.6.1"
+features = ["apple-native", "windows-native", "linux-native-sync-persistent"]
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -962,6 +962,7 @@ async fn run_orchestration(app: AppHandle, context: AppContext) -> AppResult<()>
         false,
     )
     .await;
+    crate::services::desktop_password::provision(&context, &remote, instance.id).await?;
     info!(
         "Ensuring state-agent is installed and enabled on instance {}",
         instance.id
@@ -2019,6 +2020,7 @@ async fn run_existing_instance_orchestration(
         false,
     )
     .await;
+    crate::services::desktop_password::provision(&context, &remote, instance.id).await?;
     info!(
         "Ensuring state-agent is installed and enabled on existing instance {}",
         instance.id

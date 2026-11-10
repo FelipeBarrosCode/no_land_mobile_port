@@ -1,12 +1,21 @@
 name: iOS CI
 
+env:
+  NOLAND_RUNTIME_AGENT_URL: ${{ vars.NOLAND_RUNTIME_AGENT_URL }}
+  NOLAND_RUNTIME_AGENT_SHA256: ${{ vars.NOLAND_RUNTIME_AGENT_SHA256 }}
+  NOLAND_RUNTIME_MANIFEST_URL: ${{ vars.NOLAND_RUNTIME_MANIFEST_URL }}
+  NOLAND_RUNTIME_PUBLIC_KEY: ${{ vars.NOLAND_RUNTIME_PUBLIC_KEY }}
+
 on:
   pull_request:
-  push:
-    branches: [main]
+  workflow_dispatch:
+  workflow_call:
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ios-ci-${{ github.ref }}
+  group: ios-ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -54,6 +63,7 @@ jobs:
       - name: Validate frontend and release inputs
         run: |
           npm run build
+          npm run test:runtime
           npm run i18n:check
           npm run check:ios:release
       - name: Generate maintained Xcode project

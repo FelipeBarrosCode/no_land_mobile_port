@@ -430,7 +430,7 @@ export function DashboardScreen({
       <div className="mx-auto flex w-full max-w-7xl flex-col gap-8">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div className="min-w-0">
-            <Button type="button" variant="ghost" className="mb-3 min-h-11" onClick={() => setFeedbackProgramOpen(true)}>Feedback program</Button>
+            <Button type="button" variant="ghost" className="mb-3 min-h-11" onClick={() => setFeedbackProgramOpen(true)}>{translate("feedback.54698a0574acf1a3")}</Button>
             <p className="font-display text-[10px] uppercase tracking-[0.2em] text-neon-cyan">
               {translate("generated.939edfedc701440a")}
             </p>
@@ -481,7 +481,7 @@ export function DashboardScreen({
           onClose={() => setMobileMenuOpen(false)}
         >
           <div className="grid gap-3">
-            <Button type="button" variant="ghost" className="min-h-11" onClick={() => { setMobileMenuOpen(false); setFeedbackProgramOpen(true); }}>Feedback program</Button>
+            <Button type="button" variant="ghost" className="min-h-11" onClick={() => { setMobileMenuOpen(false); setFeedbackProgramOpen(true); }}>{translate("feedback.54698a0574acf1a3")}</Button>
             <Button
               variant={systemHealth?.ok === false ? "danger" : "secondary"}
               onClick={() => { setMobileMenuOpen(false); void handleHealthClick(); }}
@@ -741,7 +741,9 @@ export function DashboardScreen({
                          disabled={busy || !isActive}
                         onClick={() => setTerminalInstanceId(instance.instanceId)}
                       >
-                        <SpriteIcon icon="terminal" className="h-5 w-5" />
+                        <svg aria-hidden="true" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="shrink-0">
+                          <path d="m4 6 6 6-6 6M13 18h7" />
+                        </svg>
                       </Button>
                       <Button
                         variant="ghost"
@@ -939,7 +941,7 @@ export function DashboardScreen({
                 </div>
                 <div>
                   <p className="font-display text-[10px] uppercase text-[#8db7d8]">
-                    Vast reliability
+                    {translate("feedback.35bea2413ebb6e7d")}
                   </p>
                   <p>
                     {(appState.selectedOffer.reliability * 100).toFixed(1)}%
@@ -965,7 +967,7 @@ export function DashboardScreen({
             {appState.selectedOffer ? (
               <div className="mt-4 grid gap-2 md:grid-cols-3">
                 <HudBar
-                  label="Vast reliability"
+                  label={translate("feedback.35bea2413ebb6e7d")}
                   value={appState.selectedOffer.reliability}
                   valueLabel={`${Math.round(appState.selectedOffer.reliability * 100)}%`}
                 />

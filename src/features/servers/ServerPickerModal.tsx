@@ -1,5 +1,6 @@
 import { translate, translateSource } from "../../lib/i18n";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { MIN_STORAGE_GB, storageAllocationLimit, isValidStorageAllocation } from "../../lib/storageAllocation";
 import { Button } from "../../components/ui/Button";
 import { Card } from "../../components/ui/Card";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
@@ -55,7 +56,6 @@ type SortMode =
   | "reliabilityAsc";
 
 const GLOBAL_COUNTRY_CODE = "GLOBAL";
-const MIN_STORAGE_GB = 30;
 
 /* Fallback shown while Vast availability is loading (or when it fails). */
 const FALLBACK_COUNTRIES: CountryOption[] = [
@@ -242,7 +242,9 @@ export function ServerPickerModal({
   }, [serverPreferences.geolocationCountryCode]);
 
   useEffect(() => {
-    setStorageInput(String(serverPreferences.storageGb || ""));
+    const nextStorage = String(serverPreferences.storageGb || "");
+    setStorageInput(nextStorage);
+    storageInputRef.current = nextStorage;
   }, [serverPreferences.storageGb]);
 
   useEffect(() => {
@@ -317,31 +319,25 @@ export function ServerPickerModal({
 
   const feedback = useMachineFeedback(displayedOffers.map(feedbackOfferMachineId), open);
 
-  const commitStorageInput = async () => {
-    const parsed = Number(storageInputRef.current);
-    if (!Number.isFinite(parsed) || parsed <= 0) {
-      return;
-    }
-    const clamped = Math.min(10000, Math.max(MIN_STORAGE_GB, Math.round(parsed)));
-    await onUpdateServerPreferences({ storageGb: clamped });
-  };
+  const pendingOffer = offers.find((offer) => offer.id === pendingOfferId);
+  const maxStorageGb = storageAllocationLimit(pendingOffer?.availableStorageGb ?? 0);
+  const storageValid = !!pendingOffer && isValidStorageAllocation(storageInput, maxStorageGb);
 
   async function confirmProvisioning() {
-    if (pendingOfferId === null) {
+    if (busy || pendingOfferId === null || !pendingOffer ||
+      !isValidStorageAllocation(storageInputRef.current, maxStorageGb)) {
       return;
     }
 
-    const parsed = Number(storageInputRef.current);
-    const effectiveStorage =
-      Number.isFinite(parsed) && parsed > 0
-        ? Math.min(10000, Math.max(MIN_STORAGE_GB, Math.round(parsed)))
-        : storageGb;
-
-    await commitStorageInput();
+    const effectiveStorage = Number(storageInputRef.current);
     const offerId = pendingOfferId;
     setPendingOfferId(null);
     await onSelectOffer(offerId, effectiveStorage);
   }
+
+  useEffect(() => {
+    if (!open) setPendingOfferId(null);
+  }, [open]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -505,20 +501,20 @@ export function ServerPickerModal({
 
             <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                Vast reliability sort
+                {translate("feedback.4a5dfdde8106a759")}
               </p>
               <div className="mt-3 grid gap-2">
                 <Button
                   variant={sortMode === "reliabilityDesc" ? "secondary" : "ghost"}
                   onClick={() => setSortMode("reliabilityDesc")}
                 >
-                  Vast: highest first
+                  {translate("feedback.c9fac56eddf758fc")}
                 </Button>
                 <Button
                   variant={sortMode === "reliabilityAsc" ? "secondary" : "ghost"}
                   onClick={() => setSortMode("reliabilityAsc")}
                 >
-                  Vast: lowest first
+                  {translate("feedback.6f6e3506dd69f822")}
                 </Button>
               </div>
             </div>
@@ -591,7 +587,7 @@ export function ServerPickerModal({
 
             <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                Vast reliability filter (%)
+                {translate("feedback.63ab489d463e6471")}
               </p>
               {reliabilityRange.swapped && (
                 <p className="mt-1 text-[1rem] leading-none text-[#ffd78a]">
@@ -600,7 +596,7 @@ export function ServerPickerModal({
               )}
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <label className="text-[1.05rem] text-[#b4c8de]">
-                  Minimum Vast %
+                  {translate("feedback.983d25e93a73e868")}
                   <input
                     type="number"
                     min={0}
@@ -613,7 +609,7 @@ export function ServerPickerModal({
                   />
                 </label>
                 <label className="text-[1.05rem] text-[#b4c8de]">
-                  Maximum Vast %
+                  {translate("feedback.46d288656ec2cc9b")}
                   <input
                     type="number"
                     min={0}
@@ -659,8 +655,8 @@ export function ServerPickerModal({
           </div>
         </details>
 
-        <p className="mb-3 text-base text-[#9ec4df]">Filtering, sorting, recommendations and automatic rental selection use Vast reliability, not community setup results. Enrichment never reorders offers.</p>
-        {feedback.enabled && feedback.unavailable && <p className="mb-3 text-base text-[#ffd78a]" role="status">Some community data is unavailable. Vast values and Rent remain usable. <button type="button" className="min-h-11 px-2 text-neon-cyan underline" onClick={feedback.retry}>Retry feedback</button></p>}
+        <p className="mb-3 text-base text-[#9ec4df]">{translate("feedback.f15c516a4cd66277")}</p>
+        {feedback.enabled && feedback.unavailable && <p className="mb-3 text-base text-[#ffd78a]" role="status">{translate("feedback.21a1079a77374eb5")} <button type="button" className="min-h-11 px-2 text-neon-cyan underline" onClick={feedback.retry}>{translate("feedback.eefae8a75e3f6c88")}</button></p>}
         <p className="mb-3 text-[1rem] text-[#9ec4df]" aria-live="polite">
           {translate("generated.d604310a789a1848")} {displayedOffers.length} {translate("generated.28391d3bc64ec15c")} {offers.length} {translate("generated.80078650c6d04361")} {offersPage}
         </p>
@@ -825,9 +821,11 @@ export function ServerPickerModal({
                   autoFocus
                   type="number"
                   min={MIN_STORAGE_GB}
-                  max={10000}
+                  max={maxStorageGb}
                   step={1}
-                  title={translate("generated.2de87204285ed008")}
+                  aria-invalid={!storageValid}
+                  aria-describedby="storage-allocation-range"
+                  title={translate("storage.allocation.range", { min: MIN_STORAGE_GB, max: maxStorageGb })}
                   className="min-h-11 border border-[#3f476c] bg-[#0b0f23] px-3 py-2 text-[1.1rem] text-[#dff8ff] shadow-[inset_0_0_0_2px_#121731]"
                   value={storageInput}
                   onChange={(event) => {
@@ -841,8 +839,8 @@ export function ServerPickerModal({
                     }
                   }}
                 />
-                <span className="text-[0.95rem] text-[#7fa8cc]">
-                  {translate("generated.0ed1817861efb77d")}
+                <span id="storage-allocation-range" className={`text-[0.95rem] ${storageValid ? "text-[#7fa8cc]" : "text-[#ff8ca2]"}`}>
+                  {translate("storage.allocation.range", { min: MIN_STORAGE_GB, max: maxStorageGb })}
                 </span>
               </label>
               <div className="mt-5 flex justify-end gap-2">
@@ -852,6 +850,7 @@ export function ServerPickerModal({
                 <Button
                   variant="secondary"
                   loading={busy}
+                  disabled={!storageValid}
                   loadingText={translate("generated.091881c9b995c77e")}
                   onClick={() => void confirmProvisioning()}
                 >

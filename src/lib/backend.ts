@@ -52,6 +52,8 @@ import type {
   InstanceDisplayStatus,
   ApplyDisplayModeResult,
   LaunchLibraryResponse,
+  RuntimeStatus,
+  RuntimeAction,
   LaunchSoftwareJob,
   SoftwareArtworkResult,
   IgdbCredentialsUpdate,
@@ -71,6 +73,10 @@ export async function moonlightPresentStream(): Promise<void> {
 
 export async function getAppState(): Promise<PersistedAppState> {
   return invokeSafe<PersistedAppState>("get_app_state");
+}
+
+export async function applyInstanceDesktopPassword(instanceId: number): Promise<void> {
+  return invokeSafe<void>("apply_instance_desktop_password", { instanceId });
 }
 
 export async function getAutoShutdownSettings(): Promise<AutoShutdownState> {
@@ -221,6 +227,14 @@ export async function subscribeDirectUploadProgress(
   return listen<DirectUploadProgressEvent>("direct-upload:progress", ({ payload }) => {
     callback(payload);
   });
+}
+
+export async function getInstanceRuntimeStatus(instanceId: number): Promise<RuntimeStatus> {
+  return invokeSafe<RuntimeStatus>("get_instance_runtime_status", { instanceId });
+}
+
+export async function instanceRuntimeAction(instanceId: number, action: RuntimeAction, file?: string, appId?: string, artifactSha256?: string): Promise<unknown> {
+  return invokeSafe<unknown>("instance_runtime_action", { instanceId, action, file, appId, artifactSha256 });
 }
 
 export async function getInstanceLaunchLibrary(
