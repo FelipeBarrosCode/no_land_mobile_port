@@ -501,20 +501,20 @@ export function ServerPickerModal({
 
             <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                Vast reliability sort
+                {translate("feedback.4a5dfdde8106a759")}
               </p>
               <div className="mt-3 grid gap-2">
                 <Button
                   variant={sortMode === "reliabilityDesc" ? "secondary" : "ghost"}
                   onClick={() => setSortMode("reliabilityDesc")}
                 >
-                  Vast: highest first
+                  {translate("feedback.c9fac56eddf758fc")}
                 </Button>
                 <Button
                   variant={sortMode === "reliabilityAsc" ? "secondary" : "ghost"}
                   onClick={() => setSortMode("reliabilityAsc")}
                 >
-                  Vast: lowest first
+                  {translate("feedback.6f6e3506dd69f822")}
                 </Button>
               </div>
             </div>
@@ -587,7 +587,7 @@ export function ServerPickerModal({
 
             <div className="rounded border border-[#3e4270] bg-[#0b0f23]/70 p-3">
               <p className="font-display text-[10px] uppercase tracking-[0.12em] text-[#9ad9ff]">
-                Vast reliability filter (%)
+                {translate("feedback.63ab489d463e6471")}
               </p>
               {reliabilityRange.swapped && (
                 <p className="mt-1 text-[1rem] leading-none text-[#ffd78a]">
@@ -596,7 +596,7 @@ export function ServerPickerModal({
               )}
               <div className="mt-3 grid grid-cols-2 gap-2">
                 <label className="text-[1.05rem] text-[#b4c8de]">
-                  Minimum Vast %
+                  {translate("feedback.983d25e93a73e868")}
                   <input
                     type="number"
                     min={0}
@@ -609,7 +609,7 @@ export function ServerPickerModal({
                   />
                 </label>
                 <label className="text-[1.05rem] text-[#b4c8de]">
-                  Maximum Vast %
+                  {translate("feedback.46d288656ec2cc9b")}
                   <input
                     type="number"
                     min={0}
@@ -655,8 +655,8 @@ export function ServerPickerModal({
           </div>
         </details>
 
-        <p className="mb-3 text-base text-[#9ec4df]">Filtering, sorting, recommendations and automatic rental selection use Vast reliability, not community setup results. Enrichment never reorders offers.</p>
-        {feedback.enabled && feedback.unavailable && <p className="mb-3 text-base text-[#ffd78a]" role="status">Some community data is unavailable. Vast values and Rent remain usable. <button type="button" className="min-h-11 px-2 text-neon-cyan underline" onClick={feedback.retry}>Retry feedback</button></p>}
+        <p className="mb-3 text-base text-[#9ec4df]">{translate("feedback.f15c516a4cd66277")}</p>
+        {feedback.enabled && feedback.unavailable && <p className="mb-3 text-base text-[#ffd78a]" role="status">{translate("feedback.21a1079a77374eb5")} <button type="button" className="min-h-11 px-2 text-neon-cyan underline" onClick={feedback.retry}>{translate("feedback.eefae8a75e3f6c88")}</button></p>}
         <p className="mb-3 text-[1rem] text-[#9ec4df]" aria-live="polite">
           {translate("generated.d604310a789a1848")} {displayedOffers.length} {translate("generated.28391d3bc64ec15c")} {offers.length} {translate("generated.80078650c6d04361")} {offersPage}
         </p>

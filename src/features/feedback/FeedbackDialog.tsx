@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import { useEffect, useId, useRef, type ReactNode } from "react";
 import { ModalBody, ModalFrame } from "../../components/ui/ModalFrame";
 import { Button } from "../../components/ui/Button";
@@ -47,7 +48,7 @@ export function FeedbackDialog({ title, onClose, busy = false, children }: {
       <div ref={content} tabIndex={-1} className="flex min-h-0 flex-1 flex-col outline-none feedback-ui [&_button]:min-h-11">
         <header className="flex shrink-0 items-center justify-between gap-3 border-b border-[#3e4270] p-4">
           <h2 id={titleId} className="min-w-0 break-words font-display text-sm leading-relaxed text-white">{title}</h2>
-          <Button type="button" variant="ghost" className="min-h-11 shrink-0" disabled={busy} onClick={onClose} aria-label={`Close ${title}`}>Close</Button>
+          <Button type="button" variant="ghost" className="min-h-11 shrink-0" disabled={busy} onClick={onClose} aria-label={translate("feedback.31225400a92b9e0f", { value0: title })}>{translate("common.close")}</Button>
         </header>
         <ModalBody className="space-y-5 p-4 text-base leading-relaxed text-[#c6dbf4] sm:p-5">{children}</ModalBody>
       </div>

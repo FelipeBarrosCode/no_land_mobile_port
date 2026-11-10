@@ -1,3 +1,4 @@
+import { translate } from "../../lib/i18n";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { isRunningInTauri } from "../../lib/tauri";
 import { safePolicyUrl } from "./model";
@@ -13,8 +14,8 @@ export function FeedbackPolicyLinks({ document }: { document: FeedbackProgramDoc
         return <a key={label} href={url} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center text-neon-cyan underline underline-offset-4" onClick={(event) => {
           if (!isRunningInTauri()) return;
           event.preventDefault();
-          void openUrl(url).catch(() => useFeedbackStore.getState().notify("The policy link could not be opened. Please try again."));
-        }}>{label}<span className="sr-only"> (opens externally)</span></a>;
+          void openUrl(url).catch(() => useFeedbackStore.getState().notify(translate("feedback.cb3d3c10aab8e832")));
+        }}>{label}<span className="sr-only"> {translate("feedback.63c8e9d7553d46bc")}</span></a>;
       })}
     </div>
   );

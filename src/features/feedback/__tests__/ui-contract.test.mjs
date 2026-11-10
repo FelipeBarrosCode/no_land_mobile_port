@@ -3,6 +3,16 @@ import assert from "node:assert/strict";
 import { readFile, readdir } from "node:fs/promises";
 
 const source = (path) => readFile(new URL(path, import.meta.url), "utf8");
+const messages = JSON.parse(await source("../../../locales/en-US.json"));
+const referencedCopy = text => [...text.matchAll(/translate\("([^"]+)"/g)].map(([, key]) => {
+  assert.equal(typeof messages[key], "string", `Missing copy: ${key}`);
+  return messages[key];
+});
+function assertCopy(text, expected) {
+  const copy = referencedCopy(text).join("\n");
+  if (expected instanceof RegExp) assert.match(copy, expected);
+  else assert.ok(copy.includes(expected), `Missing referenced UI copy: ${expected}`);
+}
 
 test("UI feedback uses only the exact native commands, no HTTP/credential storage/user-agent logic", async () => {
   const api = await source("../api.ts");
@@ -25,14 +35,14 @@ test("program UI has unchecked independent scopes, optional profile and server p
   assert.match(modal, /!pending && !busy && accepted && policiesMatch/);
   assert.match(modal, /optionalFeedbackProfile\(optionalContext, profile\)/);
   assert.match(modal, /const rejoining =/);
-  assert.match(modal, /Stop contributing/);
-  assert.match(modal, /Delete my contributions/);
+  assertCopy(modal, /Stop contributing/);
+  assertCopy(modal, /Delete my contributions/);
   assert.match(modal, /pendingControlAction\?\.enabled/);
   assert.match(modal, /pendingControlAction\?\.afterAck === "delete"/);
   assert.match(modal, /Boolean\(status\.installationId\)/);
-  assert.match(modal, /Retry original enrollment/);
-  assert.match(modal, /Server-side purge follows the published deletion policy/);
-  assert.match(modal, /You can close this window and continue using No Land/);
+  assertCopy(modal, /Retry original enrollment/);
+  assertCopy(modal, /Server-side purge follows the published deletion policy/);
+  assertCopy(modal, /You can close this window and continue using No Land/);
   assert.doesNotMatch(modal, /<FeedbackDialog[^>]*busy=/);
   const links = await source("../FeedbackPolicyLinks.tsx");
   for (const key of ["privacyUrl", "termsUrl", "deletionUrl"]) assert.ok(links.includes(`document.${key}`));
@@ -50,17 +60,18 @@ test("actual search cards enrich displayed native IDs and keep provider sorting/
   assert.match(picker, /left\.reliability - right\.reliability/);
   assert.match(picker, /const reliabilityPercent = offer\.reliability \* 100/);
   assert.match(picker, /vastReliability=\{offer\.reliability\}/);
-  assert.match(picker, /Vast reliability sort/);
-  assert.match(picker, /Vast reliability filter/);
+  assertCopy(picker, /Vast reliability sort/);
+  assertCopy(picker, /Vast reliability filter/);
   const metrics = await source("../MachineFeedbackMetrics.tsx");
-  assert.match(metrics, /aria-label=\{`View machine reviews/);
+  assert.match(metrics, /aria-label=\{translate\(/);
+  assertCopy(metrics, /View machine reviews/);
   assert.match(metrics, /event\.preventDefault\(\); event\.stopPropagation\(\)/);
   assert.match(metrics, /onKeyDown=\{\(event\) => event\.stopPropagation\(\)\}/);
-  assert.match(metrics, /No valid observations/);
-  assert.match(metrics, /Small sample/);
-  assert.match(metrics, /Latest setup outcome:/);
-  assert.match(metrics, /Updates are not new observations/);
-  assert.match(metrics, /N\/A · 0 comments/);
+  assertCopy(metrics, /No valid observations/);
+  assertCopy(metrics, /Small sample/);
+  assertCopy(metrics, /Latest setup outcome:/);
+  assertCopy(metrics, /Updates are not new observations/);
+  assertCopy(metrics, /N\/A · 0 comments/);
 });
 
 test("existing destroy confirmation gates optional review on native evidence without preselecting a score", async () => {
@@ -76,9 +87,9 @@ test("existing destroy confirmation gates optional review on native evidence wit
   assert.match(dialog, /stageFeedbackThenDestroy/);
   assert.match(dialog, /submit \? draft : \{ score: null, comment: null \}/);
   assert.match(dialog, /sameViewer && showFeedback/);
-  assert.match(dialog, /saving or clearing could not be confirmed/);
+  assertCopy(dialog, /saving or clearing could not be confirmed/);
   assert.match(dialog, /onClick=\{onCancel\}/);
-  for (const label of ["Submit and destroy", "Skip and destroy", "Cancel"]) assert.ok(dialog.includes(label));
+  for (const label of ["Submit and destroy", "Skip and destroy", "Cancel"]) assertCopy(dialog, label);
   assert.doesNotMatch(dialog, /embeddedMoonlightPaired|feedbackNative\.enroll/);
 });
 
@@ -99,7 +110,7 @@ test("native cancellation uses a durable independent tombstone and revisioned DE
 
 test("entry points and dialogs contain phone/tablet/keyboard accessibility structure", async () => {
   const dashboard = await source("../../dashboard/DashboardScreen.tsx");
-  assert.equal((dashboard.match(/>Feedback program<\/Button>/g) ?? []).length, 2);
+  assert.equal(referencedCopy(dashboard).filter(copy => copy === "Feedback program").length, 2);
   const dialog = await source("../FeedbackDialog.tsx");
   assert.match(dialog, /labelledBy=\{titleId\}/);
   assert.match(dialog, /event\.key === "Escape"/);
@@ -108,13 +119,13 @@ test("entry points and dialogs contain phone/tablet/keyboard accessibility struc
   assert.match(dialog, /ModalBody/);
   const reviews = await source("../MachineReviewsModal.tsx");
   assert.match(reviews, /whitespace-pre-wrap break-words/);
-  assert.match(reviews, /Load more reviews/);
-  assert.match(reviews, /Report review/);
-  assert.match(reviews, /Block contributor/);
+  assertCopy(reviews, /Load more reviews/);
+  assertCopy(reviews, /Report review/);
+  assertCopy(reviews, /Block contributor/);
   assert.match(reviews, /reviewVisibility === visibilityRevision/);
   assert.match(reviews, /review\.expiresAt > now/);
-  assert.match(reviews, /Route-specific jitter observations/);
-  assert.match(reviews, /Original Vast reliability:/);
+  assertCopy(reviews, /Route-specific jitter observations/);
+  assertCopy(reviews, /Original Vast reliability:/);
   const menu = await source("../../../components/ui/MobileSideMenu.tsx");
   assert.match(menu, /if \(!open\) return null/);
   assert.match(menu, /previousFocus\.focus\(\)/);
