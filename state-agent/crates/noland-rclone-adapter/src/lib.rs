@@ -260,7 +260,11 @@ pub fn default_storage_root(input: &AdapterInput) -> Result<RcloneRoot> {
             remote_name: input.remote_name.clone(),
             // Leading slash is semantically significant for SFTP: absolute
             // paths must not become paths relative to the account home.
-            root: root.trim_end_matches('/').to_string(),
+            root: if root.chars().all(|ch| ch == '/') && !root.is_empty() {
+                "/".into()
+            } else {
+                root.trim_end_matches('/').to_string()
+            },
         });
     }
     if input.provider.uses_bucket_root() {
