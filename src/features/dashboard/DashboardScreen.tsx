@@ -19,7 +19,6 @@ import {
 } from "../../lib/constants";
 import { buildDiagnosticIssueUrl } from "../../lib/githubIssue";
 import type {
-  BackupPerformanceMode,
   OfferCandidate,
   OfferCountryAvailability,
   PersistedAppState,
@@ -141,7 +140,6 @@ interface Props {
   onSaveInstanceStorageSelected: (
     instanceId: number,
     selectedPaths: string[],
-    performanceMode: BackupPerformanceMode,
   ) => Promise<string | null>;
   onSyncInstanceStorage: (
     instanceId: number,
@@ -385,7 +383,6 @@ export function DashboardScreen({
 
   async function handleExportSelection(
     selectedPaths: string[],
-    performanceMode: BackupPerformanceMode,
   ) {
     if (exportInstanceId === null) {
       return;
@@ -394,7 +391,6 @@ export function DashboardScreen({
     await onSaveInstanceStorageSelected(
       exportInstanceId,
       selectedPaths,
-      performanceMode,
     );
     setExportInstanceId(null);
   }

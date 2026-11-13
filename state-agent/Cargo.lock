@@ -554,8 +554,10 @@ name = "noland-cas"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "noland-snapshot",
  "noland-state-core",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -727,6 +729,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
@@ -766,6 +769,7 @@ dependencies = [
  "noland-crypto",
  "noland-pack",
  "noland-rclone-adapter",
+ "noland-snapshot",
  "noland-state-core",
  "noland-state-db",
  "serde",
