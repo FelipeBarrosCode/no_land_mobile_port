@@ -63,7 +63,8 @@ export function DestroyInstanceConfirmation({ instanceId, onDestroy, onCancel, a
   }
 
   return <section className="space-y-4 rounded border border-red-500/40 bg-red-900/20 p-3 text-base text-[#ffc1cf]" aria-label={translate("feedback.5bae153ab7e21d87", { value0: instanceId })}>
-    <p>{translate("feedback.c320e3609717fd2e")} {instanceId}{translate("feedback.4e7ebcf61c4fd052")}</p>
+    <p>{translate("feedback.c320e3609717fd2e")} {instanceId}?</p>
+    <p>{translate("instance.destroy.noBackup")}</p>
     {showFeedback && <fieldset className="min-w-0 space-y-3 border-t border-[#495188] pt-3 text-[#c6dbf4]" disabled={disabled}>
       <legend className="pt-3 font-semibold">{translate("feedback.9cef2ccf592b9212")}</legend>
       <p className="text-sm">{translate("feedback.131282adc15ddb50")}</p>
@@ -86,7 +87,7 @@ export function DestroyInstanceConfirmation({ instanceId, onDestroy, onCancel, a
       <Button type="button" variant="danger" className="min-h-11 w-full" disabled={disabled} onClick={() => void destroy(false)}>{showFeedback ? translate("feedback.e36ec24fb60dd10d") : translate("feedback.3100ab8bacd41b70")}</Button>
       <Button type="button" variant="ghost" className="min-h-11 w-full" disabled={destroying} onClick={onCancel}>{translate("runtime.cancel")}</Button>
     </div>
-    {destroying && <p role="status">{translate("feedback.a12a8072e8160996")}</p>}
+    {destroying && <p role="status">{translate("instance.destroy.noBackup")}</p>}
     {error && <p role="alert">{error}</p>}
   </section>;
 }

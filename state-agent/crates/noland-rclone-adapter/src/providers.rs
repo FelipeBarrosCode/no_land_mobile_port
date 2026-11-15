@@ -6,6 +6,7 @@ use aes::cipher::{BlockEncrypt, KeyInit};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use rand::RngCore;
 
+// Public compatibility key from rclone's obscure format, not a repository key.
 const RCLONE_OBSCURE_KEY: [u8; 32] = [
     0x9c, 0x93, 0x5b, 0x48, 0x73, 0x0a, 0x55, 0x4d, 0x6b, 0xfd, 0x7c, 0x63, 0xc8, 0x86, 0xa9, 0x2b,
     0xd3, 0x90, 0x19, 0x8e, 0xb8, 0x12, 0x8a, 0xfb, 0xf4, 0xde, 0x16, 0x2b, 0x8b, 0x95, 0xf6, 0x38,
@@ -283,6 +284,10 @@ fn required_config_field(
 fn obscure_password(password: &str) -> Result<String> {
     let mut iv = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut iv);
+    obscure_password_with_iv(password, iv)
+}
+
+fn obscure_password_with_iv(password: &str, iv: [u8; 16]) -> Result<String> {
     let cipher = aes::Aes256::new_from_slice(&RCLONE_OBSCURE_KEY).map_err(|error| {
         AdapterError::Invalid(format!("Initialize rclone password encoder: {error}"))
     })?;
@@ -357,6 +362,85 @@ mod tests {
     use crate::{session_from_input, TokenMode};
     use std::collections::BTreeMap;
 
+    #[test]
+    fn password_encoding_matches_upstream_rclone_vectors() {
+        // https://github.com/rclone/rclone/blob/master/fs/config/obscure/obscure_test.go
+        assert_eq!(
+            obscure_password_with_iv("", [b'a'; 16]).unwrap(),
+            "YWFhYWFhYWFhYWFhYWFhYQ"
+        );
+        assert_eq!(
+            obscure_password_with_iv("potato", [b'a'; 16]).unwrap(),
+            "YWFhYWFhYWFhYWFhYWFhYXMaGgIlEQ"
+        );
+        assert_eq!(
+            obscure_password_with_iv("potato", [b'b'; 16]).unwrap(),
+            "YmJiYmJiYmJiYmJiYmJiYp3gcEWbAw"
+        );
+    }
+
+    #[test]
+    fn sftp_preserves_absolute_root_and_obscures_passwords() {
+        let mut input = AdapterInput {
+            provider: ProviderKind::Sftp,
+            remote_name: "sftp".into(),
+            credentials: AdapterCredential::UsernamePassword {
+                username: "user".into(),
+                password: "test-password".into(),
+            },
+            fields: BTreeMap::from([
+                ("host".into(), "example.test".into()),
+                ("remote_path".into(), "/srv/backups".into()),
+            ]),
+            bucket: None,
+            prefix: None,
+        };
+        for (root, expected) in [
+            ("/srv/backups/", "/srv/backups"),
+            ("srv/backups/", "srv/backups"),
+            ("/", "/"),
+            ("///", "/"),
+            ("", ""),
+        ] {
+            for use_prefix in [false, true] {
+                input.prefix = use_prefix.then(|| root.into());
+                input.fields.insert(
+                    "remote_path".into(),
+                    if use_prefix { "ignored" } else { root }.into(),
+                );
+                let session = session_from_input(&input, "test", TokenMode::Operation).unwrap();
+                assert_eq!(session.root, expected);
+                assert!(!session.config_ini.contains("test-password"));
+                assert!(session.config_ini.contains("pass = "));
+            }
+        }
+    }
+
+    #[test]
+    fn onedrive_requires_drive_identity_for_noninteractive_transfers() {
+        let mut input = AdapterInput {
+            provider: ProviderKind::MicrosoftOneDrive,
+            remote_name: "drive".into(),
+            credentials: AdapterCredential::OAuth2 {
+                access_token: "test-token".into(),
+                refresh_token: None,
+                expires_at: 1_900_000_000,
+            },
+            fields: BTreeMap::new(),
+            bucket: None,
+            prefix: None,
+        };
+        assert!(session_from_input(&input, "test", TokenMode::Operation).is_err());
+        input.fields.insert("drive_id".into(), "test-drive".into());
+        assert!(session_from_input(&input, "test", TokenMode::Operation).is_err());
+        input.fields.insert("drive_type".into(), " ".into());
+        assert!(session_from_input(&input, "test", TokenMode::Operation).is_err());
+        input.fields.insert("drive_type".into(), "personal".into());
+        let session = session_from_input(&input, "test", TokenMode::Operation).unwrap();
+        assert!(session.config_ini.contains("drive_id = test-drive"));
+        assert!(session.config_ini.contains("drive_type = personal"));
+    }
+
     fn b2_input() -> AdapterInput {
         AdapterInput {
             provider: ProviderKind::BackblazeB2,
@@ -424,6 +508,7 @@ mod tests {
         let ephemeral = session_from_input(&input, "op", TokenMode::Ephemeral).unwrap();
         assert!(ephemeral.config_ini.contains("type = drive"));
         assert!(ephemeral.config_ini.contains("ya29.access"));
+        assert!(ephemeral.config_ini.contains("\"token_type\":\"Bearer\""));
         assert!(
             !ephemeral.config_ini.contains("1//refresh"),
             "ephemeral session must not contain the refresh token"

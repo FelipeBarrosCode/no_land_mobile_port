@@ -561,7 +561,7 @@ impl StorageProvider {
                         required: false,
                         placeholder: None,
                         help_text: Some(
-                            "Provide a password or paste a PEM private key below".to_string(),
+                            "Provide either a password or a PEM private key below".to_string(),
                         ),
                     },
                     ProviderField {
@@ -570,7 +570,7 @@ impl StorageProvider {
                         field_type: ProviderFieldType::Password,
                         required: false,
                         placeholder: Some("-----BEGIN ... PRIVATE KEY-----".to_string()),
-                        help_text: Some("Used when password is empty".to_string()),
+                        help_text: Some("Leave password empty to use this key".to_string()),
                     },
                     ProviderField {
                         key: "passphrase".to_string(),
@@ -590,12 +590,13 @@ impl StorageProvider {
                     },
                     ProviderField {
                         key: "host_keys".to_string(),
-                        label: "Pinned Host Public Key".to_string(),
+                        label: "Pinned Host Public Keys".to_string(),
                         field_type: ProviderFieldType::Text,
                         required: false,
                         placeholder: Some("ssh-ed25519 AAAAC3...".to_string()),
                         help_text: Some(
-                            "Complete public key, not only its SHA256 fingerprint".to_string(),
+                            "Complete public keys separated by commas, not SHA256 fingerprints"
+                                .to_string(),
                         ),
                     },
                 ],
@@ -692,4 +693,29 @@ pub fn list_all_providers() -> Vec<ProviderDefinition> {
         StorageProvider::Sftp.definition(),
         StorageProvider::Webdav.definition(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sftp_form_exposes_secure_key_and_password_alternatives_and_adapter_pin_name() {
+        let fields = StorageProvider::Sftp.definition().fields;
+        for key in ["password", "private_key", "passphrase"] {
+            let field = fields.iter().find(|field| field.key == key).unwrap();
+            assert!(!field.required);
+            assert!(matches!(field.field_type, ProviderFieldType::Password));
+        }
+        assert!(fields.iter().any(|field| field.key == "host_keys"));
+        assert!(!fields.iter().any(|field| field.key == "host_key"));
+    }
+
+    #[test]
+    fn onedrive_drive_identity_is_discovered_rather_than_user_guessed() {
+        let fields = StorageProvider::MicrosoftOneDrive.definition().fields;
+        assert!(!fields
+            .iter()
+            .any(|field| matches!(field.key.as_str(), "drive_id" | "drive_type")));
+    }
 }
